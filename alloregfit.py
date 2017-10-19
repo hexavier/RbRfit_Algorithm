@@ -71,7 +71,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
     summary = pd.DataFrame({'idx':range(len(rxn_id)),'reaction':reaction,'rxn_id':rxn_id,\
                             'reactant':reactant,'product':product,\
                             'enzyme':enzyme,'flux':flux,'binding_site':binding_site})
-    summary.set_index('idx')
+    summary = summary.set_index('idx')
     return summary
 
 #%% Write Rate Equations
@@ -236,6 +236,7 @@ def calculate_lik(idx,parameters, current, summary, equations, candidates=None):
 def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidates=None):
     from numpy.random import uniform
     from numpy import inf,exp
+    print('Running MCMC-NNLS for reaction %d.' % idx)
     colnames = list(parameters['parameters'].values)
     colnames.append('likelihood')
     track = pd.DataFrame(columns=colnames)
@@ -243,6 +244,7 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidate
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
     current_lik = calculate_lik(idx, parameters, current_pars, summary, equations, candidates)
     for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
+        print("\r{0}".format((float(i)/markov_par['burn_in']+markov_par['nrecord']*markov_par['freq'])*100)),
         for p in range(len(parameters)):
             proposed_pars = draw_par([p], parameters, current_pars)
             proposed_lik = calculate_lik(idx, parameters, proposed_pars, summary, equations, candidates)
@@ -257,3 +259,22 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidate
                 track = track.append(pd.DataFrame([add_pars],columns=colnames))
     track.reset_index(drop=True,inplace=True)
     return track
+
+#%% Fit reaction equations
+# Run all required functions as a block to fit predicted to measured flux.
+# Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe.
+
+def fit_reactions(summary,model,markov_par,candidates=None):
+    results = pd.DataFrame(columns=['idx','reaction','rxn_id','reg_type','regulator','best_fit','best_lik'])
+    for idx in list(summary.index):
+        expr,parameters,vbles = write_rate_equations(idx,summary,model)
+        parameters = build_priors(parameters,idx,summary,model)
+        track = fit_reaction_MCMC(idx,markov_par,parameters,summary,expr)
+        max_lik = max(track['likelihood'].values)
+        max_par = track[track['likelihood'].values==max_lik]
+        add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
+               'reg_type':[''],'regulator':[''],'best_fit':max_par,'best_lik':max_lik}
+        results = results.append([add])
+    results = results.set_index('idx')
+    results = results.sort_values(by='best_lik')
+    return results
