@@ -14,8 +14,10 @@ metabolites = pd.read_excel(data_dir+"metabolites.xlsx",index_col="name")
 proteins = pd.read_excel(data_dir+"proteins.xlsx",index_col="name")
 mapping = pd.read_table(data_dir+"ECOLI_83333_idmapping.dat",header=None)
 rxn_id = open(data_dir+'reactions.txt').read().splitlines()
+reg_coli = pd.read_csv(data_dir+"SMRN.csv",index_col="rxn_id")
 
 summary = arf.define_reactions(rxn_id,model,fluxes,proteins,metabolites)
+candidates = arf.define_candidates(rxn_id,reg_coli,metabolites)
 markov_par = {'freq':20,'nrecord':200,'burn_in':0} # Record once every 20 samples, 200 samples, skip 0 first samples
 
 results = arf.fit_reactions(summary,model,markov_par)
