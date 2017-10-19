@@ -1,9 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Fri Oct 13 09:06:20 2017
-
-@author: user
-"""
 
 import pandas as pd
 import cobra
@@ -21,7 +16,10 @@ mapping = pd.read_table(data_dir+"ECOLI_83333_idmapping.dat",header=None)
 rxn_id = open(data_dir+'reactions.txt').read().splitlines()
 
 summary = arf.define_reactions(rxn_id,model,fluxes,proteins,metabolites)
+markov_par = {'freq':20,'nrecord':200,'burn_in':0} # Record once every 20 samples, 200 samples, skip 0 first samples
 
 for idx in list(summary.index):
-    expr,parameters = arf.write_rate_equations(idx,summary,model)
+    expr,parameters,vbles = arf.write_rate_equations(idx,summary,model)
     parameters = arf.build_priors(parameters,idx,summary,model)
+    track = arf.fit_reaction_MCMC(idx,markov_par,parameters,summary,expr)
+    

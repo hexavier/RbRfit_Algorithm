@@ -10,6 +10,7 @@ import sympy as sym
 # DataFrame containing prot x cond, and DataFrame with metabolites x cond.
 
 def define_reactions(rxn_id, model, fluxes, prot, metab):
+    from numpy import isnan
     mapping = pd.read_table("ECOLI_83333_idmapping.dat",header=None)
     reaction, reactant, product, enzyme, flux = ([] for l in range(5))
     for i in range(len(rxn_id)):
@@ -19,38 +20,48 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
         react = model.reactions.get_by_id(rxn_id[i]).reactants
         react_df = []
         name_r = []
+        ncond = fluxes.shape[1]
+        react_bool = [True]*ncond
         for j in range(len(react)):
             met_r = react[j].id[:-2] #strip compartment letter from id
             if (any(met_r in s for s in ['h','h2o'])==0):
                 react_df.append(metab.loc[met_r].values)
                 name_r.append(react[j].id)
+                react_bool = (react_bool & isnan(metab.loc[met_r].values)==0)
         react_df = pd.DataFrame(react_df,columns = metab.columns, index = name_r)
-        reactant.append(react_df)
         # Product values
         prod = model.reactions.get_by_id(rxn_id[i]).products
         prod_df = []
         name_p = []
+        prod_bool = [True]*ncond
         for j in range(len(prod)):
             met_p = prod[j].id[:-2] #strip compartment letter from id
-            if (any(met_p in s for s in [metab.index.values])&(any(met_p in s for s in ['h','h2o'])==0)):
+            if (any(met_p in s for s in [metab.index.values]) and (any(met_p in s for s in ['h','h2o'])==0)):
                 prod_df.append(metab.loc[met_p].values)
                 name_p.append(prod[j].id)
+                prod_bool = (prod_bool & isnan(metab.loc[met_p].values)==0)
         prod_df = pd.DataFrame(prod_df,columns = metab.columns, index = name_p)
-        product.append(prod_df)
         # Enzyme values
         enz = list(model.reactions.get_by_id(rxn_id[i]).genes)
         enz_df = []
         name_e = []
+        enz_bool = [True]*ncond
         for j in range(len(enz)):
             gene = mapping[mapping[2]==enz[j].id][0].reset_index()
-            gene = list(mapping[(mapping[0]==gene[0][0]) & (mapping[1]=='Gene_Name')][2])
+            gene = list(mapping[((mapping[0]==gene[0][0]) & (mapping[1]=='Gene_Name'))][2])
             if any(gene[0] in s for s in [prot.index.values]):
                 enz_df.append(prot.loc[gene[0]].values)
                 name_e.append(gene)
+                enz_bool = (enz_bool & isnan(prot.loc[gene[0]].values)==0)
         enz_df = pd.DataFrame(enz_df, columns = prot.columns, index = name_e)
-        enzyme.append(enz_df)
-        # Flux values
-        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]))
+        # Append all data
+        flux_bool = isnan(fluxes.loc[rxn_id[i]].values)==0
+        bool_all = (react_bool & prod_bool & enz_bool & flux_bool)
+        reactant.append(react_df.loc[:,bool_all])
+        product.append(prod_df.loc[:,bool_all])
+        enzyme.append(enz_df.loc[:,bool_all])
+        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]).loc[:,bool_all])
+        
         
     binding_site = [[['fum_c','mal_L_c']],[['6pgc_c'],['nadp_c','nadph_c']]\
                     ,[['mal_L_c'],['nad_c','nadh_c']],[['atp_c','adp_c'],['f6p_c','fdp_c']]\
@@ -70,7 +81,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
 
 def write_rate_equations(idx,summary, model, candidates=None):
     if candidates is None:
-        parameters, species, speciestype = ([] for i in range(3))
+        parameters, species, speciestype, vbles = ([] for i in range(4))
         # Define Vmax expression:
         enzyme = list(summary['enzyme'][idx].index)
         vmax = sym.sympify('0')
@@ -78,9 +89,9 @@ def write_rate_equations(idx,summary, model, candidates=None):
             K = str('K_cat_%s' % enz)
             E = str('c_%s' % enz)
             vmax += sym.sympify(K+'*'+E)
-            parameters.append(K), species.append(enz), speciestype.append('enz')
+            # parameters.append(K), species.append(enz), speciestype.append('enz')
             
-        # Define occupation term. Start with the numerator:
+        # Define occupancy term. Start with the numerator:
         reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
         substrate = list(summary['reactant'][idx].index)
         num1 = sym.sympify('1')
@@ -91,7 +102,7 @@ def write_rate_equations(idx,summary, model, candidates=None):
             S = str('c_%s' % sub)
             exp = abs(reaction.get_coefficient(sub))
             num2 *= sym.sympify(S+'**'+str(exp))
-            parameters.append(K), species.append(sub), speciestype.append('met')
+            parameters.append(K), species.append(sub), speciestype.append('met'), vbles.extend([K,S])
         num1 = 1/num1            
         
         product = list(summary['product'][idx].index)
@@ -102,7 +113,7 @@ def write_rate_equations(idx,summary, model, candidates=None):
                 exp = abs(reaction.get_coefficient(prod))
                 num3 *= sym.sympify(P+'**'+str(exp))
             K_eq = sym.symbols('K_eq')
-            parameters.append('K_eq'), species.append('K_eq'), speciestype.append('K_eq')
+            parameters.append('K_eq'), species.append('K_eq'), speciestype.append('K_eq'), vbles.extend([K_eq,P])
             num3 = (1/K_eq)*num3
             num = num1*(num2-num3)
         else:
@@ -118,25 +129,25 @@ def write_rate_equations(idx,summary, model, candidates=None):
                     R = str('c_%s' % met)
                     K = str('K_%s' % met)
                     den_site += sym.sympify('('+R+'/'+K+')**'+str(j))
-                    parameters.append(K), species.append(met), speciestype.append('met')
+                    parameters.append(K), species.append(met), speciestype.append('met'), vbles.extend([R,K])
             den *= den_site
         
         # Paste all the parts together:
-        expr = vmax*(num/den)
+        expr = {'full':vmax*(num/den),'occu':(num/den)}
         
         # Generate list of parameters:
         parframe = pd.DataFrame({'parameters':parameters,'species':species,'speciestype':speciestype})
         parframe.drop_duplicates('parameters',inplace=True)
         parframe.reset_index(drop=True,inplace=True)
         
-        return expr,parframe
+        return expr,parframe, vbles
 
 #%% Build parameter priors
 # For each of the parameters, define the prior/proposal distribution needed for MCMC.
 # Inputs: dataframe with parameters, summary generated in define_reactions, the 
 # stoichiometric model, and candidate dataframe.            
 def build_priors(param, idx, summary, model, candidates=None):
-    from numpy import log2,nanmedian,nan
+    from numpy import log2,nanmedian#,nan
     reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
     distribution, par1, par2 = ([] for i in range(3))
     for i,par in enumerate(param['parameters']):
@@ -148,10 +159,10 @@ def build_priors(param, idx, summary, model, candidates=None):
             elif any(param['species'][i] in s for s in [summary['product'][idx].index.values]):
                 par1.append(-15.0+log2(nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
                 par2.append(15.0+log2(nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
-        elif param['speciestype'][i] == 'enz':
-            distribution.append(nan)
-            par1.append(nan)
-            par2.append(nan)
+#         elif param['speciestype'][i] == 'enz':
+#             distribution.append(nan)
+#             par1.append(nan)
+#             par2.append(nan)
         elif param['speciestype'][i] == 'K_eq':
             distribution.append('unif')
             Q_r = 1
@@ -167,3 +178,82 @@ def build_priors(param, idx, summary, model, candidates=None):
     param['par1'] = pd.Series(par1, index=param.index)
     param['par2'] = pd.Series(par2, index=param.index)
     return param
+
+#%% Draw parameters
+# From the prior distribution, update those parameters that are present in ‘updates’.
+# Inputs: parameter indeces to update within a list, parameter dataframe with priors, current values.
+def draw_par(update, parameters, current):
+    from numpy.random import uniform
+    draw = current
+    for par in update:
+        if parameters['distribution'][par]=='unif':
+            draw[par] = uniform(parameters['par1'][par],parameters['par2'][par])
+        else:
+            print('Invalid distribution')
+    return draw
+
+#%% Calculate likelihood
+# Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
+# Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
+# equations, and candidates dataframe.
+def calculate_lik(idx,parameters, current, summary, equations, candidates=None):
+    import numpy as np
+    from scipy.stats import norm
+    from scipy.optimize import nnls
+    if len(summary['flux'][idx]) == 1: # fluxes as point estimates
+        flux = summary['flux'][idx].values
+        occu = equations['occu']
+        ncond = flux.shape[1]
+        current = np.array(current)
+        vbles = []
+        vbles_vals = []
+        for par in list(parameters['parameters'].values):
+            vbles.append(par)
+            rep_par = np.repeat(current[parameters['parameters'].values==par],ncond)
+            vbles_vals.append(rep_par)
+        for sub in list(summary['reactant'][idx].index):
+            vbles.append('c_'+sub)
+            vbles_vals.append(summary['reactant'][idx].loc[sub].values)
+        for prod in list(summary['product'][idx].index):
+            vbles.append('c_'+prod)
+            vbles_vals.append(summary['product'][idx].loc[prod].values)
+            
+        f = sym.lambdify(vbles, occu)
+        pred_occu = f(*vbles_vals)
+        enz = summary['enzyme'][idx].values
+        kcat, residual = nnls((pred_occu*enz).reshape((ncond,1)), flux.reshape(ncond))
+        pred_flux = kcat*pred_occu*enz
+        npars = len(current)+len(kcat)
+        var = np.sum((flux-pred_flux)**2)/(ncond-npars)
+        likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
+        return np.sum(np.log(likelihood))
+
+#%% Fit reaction equation using MCMC-NNLS
+# Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
+# Inputs: markov parameters (fraction of samples that are reported, how many samples are 
+# desired, how many initial samples are skipped), parameters table with priors, 
+# summary as generated in define_reactions, equations, and candidates table.
+def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidates=None):
+    from numpy.random import uniform
+    from numpy import inf,exp
+    colnames = list(parameters['parameters'].values)
+    colnames.append('likelihood')
+    track = pd.DataFrame(columns=colnames)
+    current_pars = [None] * len(parameters)
+    current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
+    current_lik = calculate_lik(idx, parameters, current_pars, summary, equations, candidates)
+    for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
+        for p in range(len(parameters)):
+            proposed_pars = draw_par([p], parameters, current_pars)
+            proposed_lik = calculate_lik(idx, parameters, proposed_pars, summary, equations, candidates)
+            if ((uniform(0,1) < exp(proposed_lik-current_lik)) or \
+                (proposed_lik==current_lik and proposed_lik==-inf)):
+                current_pars = proposed_pars
+                current_lik = proposed_lik
+        if (i > markov_par['burn_in']):
+            if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
+                add_pars = list(current_pars)
+                add_pars.append(current_lik)
+                track = track.append(pd.DataFrame([add_pars],columns=colnames))
+    track.reset_index(drop=True,inplace=True)
+    return track
