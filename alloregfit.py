@@ -359,8 +359,6 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), flux.reshape(ncond)) ##Bug
         pred_flux = kcat*pred_occu*enz
         npars = len(current)+len(kcat)
-        if ncond<=npars:
-            print('ERROR: Too many parameters for too few conditions.')
         var = np.sum((flux-pred_flux)**2)/(ncond-npars)
         likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
         return np.sum(np.log(likelihood)),kcat
