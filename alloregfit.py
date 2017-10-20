@@ -44,7 +44,7 @@ def extract_info_df(molecules, dataset, mol_type):
 # DataFrame containing prot x cond, and DataFrame with metabolites x cond.
 
 def define_reactions(rxn_id, model, fluxes, prot, metab):
-    reaction, reactant, product, enzyme, flux = ([] for l in range(5))
+    reaction, reactant, product, enzyme, flux, bools = ([] for l in range(6))
     for i in range(len(rxn_id)):
         # Reaction value
         reaction.append(model.reactions.get_by_id(rxn_id[i]).reaction)
@@ -64,6 +64,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
         product.append(prod_df.loc[:,bool_all])
         enzyme.append(enz_df.loc[:,bool_all])
         flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]).loc[:,bool_all])
+        bools.append(bool_all)
         
     # Provisional binding site before we can automatize it:
     binding_site = [[['fum_c','mal_L_c']],[['6pgc_c'],['nadp_c','nadph_c']]\
@@ -75,7 +76,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
                             'reactant':reactant,'product':product,\
                             'enzyme':enzyme,'flux':flux,'binding_site':binding_site})
     summary = summary.set_index('idx')
-    return summary
+    return summary,bools
 
 #%% Define candidates
 # For each reaction, a table with the regulators is created. 
@@ -83,7 +84,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
 # for all rxn_id in E. coli, DataFrame with metabolites x cond, and DataFrame with
 # regulators for all rxn_id in other organisms (optional).
     
-def define_candidates(rxn_id,reg_coli,metab,reg_other=None):
+def define_candidates(rxn_id,reg_coli,metab,bools,reg_other=None):
     act_coli, inh_coli, act_other, inh_other = ([] for l in range(4))
     for i in range(len(rxn_id)):
         if (any(rxn_id[i].lower() in s for s in [reg_coli.index.values])):
@@ -102,13 +103,11 @@ def define_candidates(rxn_id,reg_coli,metab,reg_other=None):
             if act_coli_df.empty:
                 act_coli.append('No data available for the candidate activators.')
             else:
-                act_coli_df.drop_duplicates(inplace=True)
-                act_coli.append(act_coli_df)
+                act_coli_df.drop_duplicates(inplace=True); act_coli.append(act_coli_df.loc[:,bools[i]])
             if inh_coli_df.empty:
                 inh_coli.append('No data available for the candidate activators.')
             else:
-                inh_coli_df.drop_duplicates(inplace=True)
-                inh_coli.append(inh_coli_df)
+                inh_coli_df.drop_duplicates(inplace=True); inh_coli.append(inh_coli_df.loc[:,bools[i]])
         else:
             act_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
             inh_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
@@ -122,77 +121,139 @@ def define_candidates(rxn_id,reg_coli,metab,reg_other=None):
     candidates = candidates.set_index('idx')
     return candidates        
 
+#%% Write regulator expression
+# For each regulator, write the regulatory expression to add.
+# Inputs: list of regulators and their +/- effect.
+    
+def write_reg_expr(regulators,reg_type):
+    add, newframe, reglist = ([] for l in range(3))
+    for reg in regulators:
+        R = str('c_%s' % reg)
+        K = str('K_%s' % reg)
+        if reg_type=='activator':
+            add.append(sym.sympify(R+'/('+R+'+'+K+')'))
+            reglist.append('ACT:'+reg)
+        elif reg_type=='inhibitor':
+            add.append(sym.sympify('1/(1+('+R+'/'+K+'))'))
+            reglist.append('INH:'+reg)
+        new_par = [K]; new_spe = [reg]; new_spetype = ['met']
+        newframe.append(pd.DataFrame({'parameters':new_par,'species':new_spe,'speciestype':new_spetype}))
+    return add, newframe, reglist
+
+#%% Add regulators
+# For all kind of regulators, generate a structure containing all expressions to add, and their respective parameters.
+# Inputs: candidates dataframe
+def add_regulators(idx,candidates):
+    add, newframe, reg = ([] for l in range(3))
+    if str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
+        act_coli = list(candidates['act_coli'][idx].index)
+        add1, newframe1, reg1 = write_reg_expr(act_coli,'activator')
+        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    if str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
+        inh_coli = list(candidates['inh_coli'][idx].index)
+        add1, newframe1, reg1 = write_reg_expr(inh_coli,'inhibitor')
+        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    if str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
+        act_other = list(candidates['act_other'][idx].index)
+        add1, newframe1, reg1 = write_reg_expr(act_other,'activator')
+        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    if str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
+        inh_other = list(candidates['inh_other'][idx].index)
+        add1, newframe1, reg1 = write_reg_expr(inh_other,'inhibitor')
+        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    return add, newframe, reg
+    
 #%% Write Rate Equations
 # For each of the models, write one rate equation expression. If products are available, include them.
 # Inputs: summary generated by define_reactions, idx defining the reaction that is analyzed,
 # stoichiometric model and candidates dataframe (optional).
 
-def write_rate_equations(idx,summary, model, candidates=None):
-    if candidates is None:
-        parameters, species, speciestype, vbles = ([] for i in range(4))
-        # Define Vmax expression:
-        enzyme = list(summary['enzyme'][idx].index)
-        vmax = sym.sympify('0')
-        for enz in enzyme:
-            K = str('K_cat_%s' % enz)
-            E = str('c_%s' % enz)
-            vmax += sym.sympify(K+'*'+E)
-            
-        # Define occupancy term. Start with the numerator:
-        reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
-        substrate = list(summary['reactant'][idx].index)
-        num1 = sym.sympify('1')
-        num2 = sym.sympify('1')
-        for sub in substrate:
-            K = str('K_%s' % sub)
-            num1 *= sym.sympify(K)
-            S = str('c_%s' % sub)
-            exp = abs(reaction.get_coefficient(sub))
-            num2 *= sym.sympify(S+'**'+str(exp))
-            parameters.append(K), species.append(sub), speciestype.append('met'), vbles.extend([K,S])
-        num1 = 1/num1            
+def write_rate_equations(idx,summary, model, candidates=None, nreg=1):
+    parameters, species, speciestype = ([] for i in range(3))
+    # Define Vmax expression:
+    enzyme = list(summary['enzyme'][idx].index)
+    vmax = sym.sympify('0')
+    for enz in enzyme:
+        K = str('K_cat_%s' % enz)
+        E = str('c_%s' % enz)
+        vmax += sym.sympify(K+'*'+E)
         
-        product = list(summary['product'][idx].index)
-        if product:
-            num3 = sym.sympify('1')
-            for prod in product:
-                P = str('c_%s' % prod)
-                exp = abs(reaction.get_coefficient(prod))
-                num3 *= sym.sympify(P+'**'+str(exp))
-            K_eq = sym.symbols('K_eq')
-            parameters.append('K_eq'), species.append('K_eq'), speciestype.append('K_eq'), vbles.extend([K_eq,P])
-            num3 = (1/K_eq)*num3
-            num = num1*(num2-num3)
-        else:
-            num = num1*num2
+    # Define occupancy term. Start with the numerator:
+    reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
+    substrate = list(summary['reactant'][idx].index)
+    num1 = sym.sympify('1')
+    num2 = sym.sympify('1')
+    for sub in substrate:
+        K = str('K_%s' % sub)
+        num1 *= sym.sympify(K)
+        S = str('c_%s' % sub)
+        exp = abs(reaction.get_coefficient(sub))
+        num2 *= sym.sympify(S+'**'+str(exp))
+        parameters.append(K), species.append(sub), speciestype.append('met')
+    num1 = 1/num1            
+    
+    product = list(summary['product'][idx].index)
+    if product:
+        num3 = sym.sympify('1')
+        for prod in product:
+            P = str('c_%s' % prod)
+            exp = abs(reaction.get_coefficient(prod))
+            num3 *= sym.sympify(P+'**'+str(exp))
+        K_eq = sym.symbols('K_eq')
+        parameters.append('K_eq'), species.append('K_eq'), speciestype.append('K_eq')
+        num3 = (1/K_eq)*num3
+        num = num1*(num2-num3)
+    else:
+        num = num1*num2
+    
+    # Define the denominator:
+    den = sym.sympify('1')
+    for i,site in enumerate(summary['binding_site'][idx]):
+        den_site = sym.sympify('1')
+        for met in summary['binding_site'][idx][i]:
+            exp = int(abs(reaction.get_coefficient(met)))
+            for j in range(1, (exp+1)):
+                R = str('c_%s' % met)
+                K = str('K_%s' % met)
+                den_site += sym.sympify('('+R+'/'+K+')**'+str(j))
+                parameters.append(K), species.append(met), speciestype.append('met')
+        den *= den_site
         
-        # Define the denominator:
-        den = sym.sympify('1')
-        for i,site in enumerate(summary['binding_site'][idx]):
-            den_site = sym.sympify('1')
-            for met in summary['binding_site'][idx][i]:
-                exp = int(abs(reaction.get_coefficient(met)))
-                for j in range(1, (exp+1)):
-                    R = str('c_%s' % met)
-                    K = str('K_%s' % met)
-                    den_site += sym.sympify('('+R+'/'+K+')**'+str(j))
-                    parameters.append(K), species.append(met), speciestype.append('met'), vbles.extend([R,K])
-            den *= den_site
-        
-        # Paste all the parts together:
-        expr = {'vmax':vmax,'occu':(num/den)}
-        
-        # Generate list of parameters:
-        parframe = pd.DataFrame({'parameters':parameters,'species':species,'speciestype':speciestype})
-        parframe.drop_duplicates('parameters',inplace=True)
-        parframe.reset_index(drop=True,inplace=True)
-        
-        return expr,parframe, vbles
+    # Paste all the parts together:
+    expr = [{'vmax':vmax,'occu':(num/den)}]
+    
+    # Generate list of parameters:
+    parframe = [pd.DataFrame({'parameters':parameters,'species':species,'speciestype':speciestype})]
+    parframe[0].drop_duplicates('parameters',inplace=True)
+    parframe[0].reset_index(drop=True,inplace=True)
+    regulator = ['']
+    
+    if (candidates is not None) and (nreg>=1):
+        add, newframe, reg = add_regulators(idx,candidates)
+        for i in range(len(add)):
+            expr.append({'vmax':vmax,'occu':add[i]*(num/den)})
+            addframe = parframe[0].append(newframe[i])
+            addframe.drop_duplicates('parameters',inplace=True)
+            addframe.reset_index(drop=True,inplace=True)
+            parframe.append(addframe)
+            regulator.append([reg[i]])
+            if nreg>=2:
+                for j in range(len(add)):
+                    if i!=j:
+                        expr.append({'vmax':vmax,'occu':add[j]*add[i]*(num/den)})
+                        addframe = parframe[0].append(newframe[i])
+                        addframe = addframe.append(newframe[j])
+                        addframe.drop_duplicates('parameters',inplace=True)
+                        addframe.reset_index(drop=True,inplace=True)
+                        parframe.append(addframe.drop_duplicates('parameters',inplace=True))
+                        regulator.append([reg[i],reg[j]])
+    
+    return expr,parframe,regulator
 
 #%% Build parameter priors
 # For each of the parameters, define the prior/proposal distribution needed for MCMC.
 # Inputs: dataframe with parameters, summary generated in define_reactions, the 
-# stoichiometric model, and candidate dataframe (optional).            
+# stoichiometric model, and candidate dataframe.            
 def build_priors(param, idx, summary, model, candidates=None):
     reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
     distribution, par1, par2 = ([] for i in range(3))
@@ -205,6 +266,22 @@ def build_priors(param, idx, summary, model, candidates=None):
             elif any(param['species'][i] in s for s in [summary['product'][idx].index.values]):
                 par1.append(-15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
                 par2.append(15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
+            elif (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(param['species'][i] in s for s in [candidates['act_coli'][idx].index.values])):
+                par1.append(-15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
+                par2.append(15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
+            elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(param['species'][i] in s for s in [candidates['inh_coli'][idx].index.values])):
+                par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
+                par2.append(15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
+            elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(param['species'][i] in s for s in [candidates['act_other'][idx].index.values])):
+                par1.append(-15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
+                par2.append(15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
+            elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(param['species'][i] in s for s in [candidates['inh_other'][idx].index.values])):
+                par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
+                par2.append(15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
         elif param['speciestype'][i] == 'K_eq':
             distribution.append('unif')
             Q_r = 1
@@ -236,8 +313,8 @@ def draw_par(update, parameters, current):
 #%% Calculate likelihood
 # Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
 # Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
-# equations.
-def calculate_lik(idx,parameters, current, summary, equations):
+# equations, and candidates.
+def calculate_lik(idx,parameters, current, summary, equations,candidates=None,regulator=None):
     if len(summary['flux'][idx]) == 1: # fluxes as point estimates
         flux = summary['flux'][idx].values
         occu = equations['occu']
@@ -255,13 +332,35 @@ def calculate_lik(idx,parameters, current, summary, equations):
         for prod in list(summary['product'][idx].index):
             vbles.append('c_'+prod)
             vbles_vals.append(summary['product'][idx].loc[prod].values)
+        if regulator:
+            for reg in regulator:
+                reg = reg[4:]
+                if (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+                (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
+                elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+                (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
+                elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+                (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
+                elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+                (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
             
         f = sym.lambdify(vbles, occu)
         pred_occu = f(*vbles_vals)
         enz = summary['enzyme'][idx].values
-        kcat, residual = nnls((pred_occu*enz).reshape((ncond,1)), flux.reshape(ncond)) ##Bug
+        nenz = enz.shape[0]
+        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), flux.reshape(ncond)) ##Bug
         pred_flux = kcat*pred_occu*enz
         npars = len(current)+len(kcat)
+        if ncond<=npars:
+            print('ERROR: Too many parameters for too few conditions.')
         var = np.sum((flux-pred_flux)**2)/(ncond-npars)
         likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
         return np.sum(np.log(likelihood)),kcat
@@ -270,29 +369,29 @@ def calculate_lik(idx,parameters, current, summary, equations):
 # Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
 # Inputs: markov parameters (fraction of samples that are reported, how many samples are 
 # desired, how many initial samples are skipped), parameters table with priors, 
-# summary as generated in define_reactions, equations.
-def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidates=None):
-    print('Running MCMC-NNLS for reaction %d...' % idx)
+# summary as generated in define_reactions, equations, and candidates.
+def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates=None,regulator=None):
+    print('Running MCMC-NNLS for reaction %d... Candidate regulator: %s' % (idx,regulator))
     colnames = list(parameters['parameters'].values)
     colnames.append('kcat')
     colnames.append('likelihood')
     track = pd.DataFrame(columns=colnames)
     current_pars = [None] * len(parameters)
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
-    current_lik,cur_kcat = calculate_lik(idx, parameters, current_pars, summary, equations)
+    current_lik,cur_kcat = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
     for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
         for p in range(len(parameters)):
             proposed_pars = draw_par([p], parameters, current_pars)
-            proposed_lik,pro_kcat = calculate_lik(idx, parameters, proposed_pars, summary, equations)
+            proposed_lik,pro_kcat = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
             if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
-                (proposed_lik > current_lik)):
+                (proposed_lik > current_lik) or ((proposed_lik==current_lik)and(proposed_lik==-np.inf))):
                 current_pars = proposed_pars
                 cur_kcat = pro_kcat
                 current_lik = proposed_lik
         if (i > markov_par['burn_in']):
             if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
                 add_pars = list(current_pars)
-                add_pars.append(float(cur_kcat))
+                add_pars.extend(cur_kcat)
                 add_pars.append(current_lik)
                 track = track.append(pd.DataFrame([add_pars],columns=colnames))
     track.reset_index(drop=True,inplace=True)
@@ -302,17 +401,18 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations, candidate
 # Run all required functions as a block to fit predicted to measured flux.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
 
-def fit_reactions(summary,model,markov_par,candidates=None):
-    results = pd.DataFrame(columns=['idx','reaction','rxn_id','reg_type','regulator','best_fit','best_lik'])
+def fit_reactions(summary,model,markov_par,candidates=None,nreg=1):
+    results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','best_fit','best_lik'])
     for idx in list(summary.index):
-        expr,parameters,vbles = write_rate_equations(idx,summary,model)
-        parameters = build_priors(parameters,idx,summary,model)
-        track = fit_reaction_MCMC(idx,markov_par,parameters,summary,expr)
-        max_lik = max(track['likelihood'].values)
-        max_par = track[track['likelihood'].values==max_lik]
-        add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
-               'reg_type':[''],'regulator':[''],'best_fit':max_par,'best_lik':max_lik}
-        results = results.append([add])
+        expr,parameters,regulator = write_rate_equations(idx,summary,model,candidates,nreg)
+        for i in range(len(expr)):
+            parameters[i] = build_priors(parameters[i],idx,summary,model,candidates)
+            track = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i])
+            max_lik = max(track['likelihood'].values)
+            max_par = track[track['likelihood'].values==max_lik]
+            add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
+                   'regulator':regulator[i],'best_fit':max_par,'best_lik':max_lik}
+            results = results.append([add])
     results = results.set_index('idx')
     results = results.sort_values(by='best_lik')
     return results
