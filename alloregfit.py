@@ -7,6 +7,8 @@ import numpy as np
 from numpy.random import uniform
 from scipy.stats import norm
 from scipy.optimize import nnls
+from scipy.integrate import quad
+from math import pi,e
 
 #%% Extract available molecules
 # For all the molecules involved in the reaction, extract the corresponding omics data.
@@ -324,53 +326,64 @@ def draw_par(update, parameters, current):
             print('Invalid distribution')
     return draw
 
+
+#%% Calculate likelihood between flux range
+# Given the flux prediction and min/max fluxes from FVA, integrate normal PDF calculation over this range.
+# Inputs: min/max flux and prediction.
+def range_PDF(pred_flux, flux, ncond, npars):
+    def PDF(x,y):
+        return (1/(np.sqrt(np.sum((x-y)**2)/(ncond-npars))*np.sqrt(2*pi)))*e**(-(x-y)**2/(2*(np.sum((x-y)**2)/(ncond-npars))))
+    likelihood = np.array(list(map(lambda i: quad(PDF,flux[0][i],flux[1][i],args=pred_flux[0][i]),\
+                                   [n for n in range(pred_flux.size)])))
+    return likelihood[:,0]
+    
 #%% Calculate likelihood
 # Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
 # Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
 # equations, and candidates.
 def calculate_lik(idx,parameters, current, summary, equations,candidates=None,regulator=None):
+    occu = equations['occu']
+    enz = summary['enzyme'][idx].values
+    ncond = enz.shape[1]
+    current = np.array(current)
+    vbles = []
+    vbles_vals = []
+    for par in list(parameters['parameters'].values):
+        vbles.append(par)
+        rep_par = np.repeat(2**current[parameters['parameters'].values==par],ncond)
+        vbles_vals.append(rep_par)
+    for sub in list(summary['reactant'][idx].index):
+        vbles.append('c_'+sub)
+        vbles_vals.append(summary['reactant'][idx].loc[sub].values)
+    for prod in list(summary['product'][idx].index):
+        vbles.append('c_'+prod)
+        vbles_vals.append(summary['product'][idx].loc[prod].values)
+    if regulator:
+        for reg in regulator:
+            reg = reg[4:]
+            if (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                vbles.append('c_'+reg)
+                vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
+            elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                vbles.append('c_'+reg)
+                vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
+            elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                vbles.append('c_'+reg)
+                vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
+            elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
+            (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                vbles.append('c_'+reg)
+                vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
+        
+    f = sym.lambdify(vbles, occu)
+    pred_occu = f(*vbles_vals)
+    nenz = enz.shape[0]
+    flux = summary['flux'][idx].values
     if len(summary['flux'][idx]) == 1: # fluxes as point estimates
-        flux = summary['flux'][idx].values
-        occu = equations['occu']
-        ncond = flux.shape[1]
-        current = np.array(current)
-        vbles = []
-        vbles_vals = []
-        for par in list(parameters['parameters'].values):
-            vbles.append(par)
-            rep_par = np.repeat(2**current[parameters['parameters'].values==par],ncond)
-            vbles_vals.append(rep_par)
-        for sub in list(summary['reactant'][idx].index):
-            vbles.append('c_'+sub)
-            vbles_vals.append(summary['reactant'][idx].loc[sub].values)
-        for prod in list(summary['product'][idx].index):
-            vbles.append('c_'+prod)
-            vbles_vals.append(summary['product'][idx].loc[prod].values)
-        if regulator:
-            for reg in regulator:
-                reg = reg[4:]
-                if (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-                (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                    vbles.append('c_'+reg)
-                    vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
-                elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-                (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                    vbles.append('c_'+reg)
-                    vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
-                elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-                (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                    vbles.append('c_'+reg)
-                    vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
-                elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-                (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                    vbles.append('c_'+reg)
-                    vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
-            
-        f = sym.lambdify(vbles, occu)
-        pred_occu = f(*vbles_vals)
-        enz = summary['enzyme'][idx].values
-        nenz = enz.shape[0]
-        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), flux.reshape(ncond)) ##Bug
+        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), flux.reshape(ncond))
         pred_flux = kcat*pred_occu*enz
         npars = len(current)+len(kcat)
         if ncond>npars:
@@ -378,7 +391,17 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
             likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
             return np.sum(np.log(likelihood)),kcat
         else:
-            return None,None # Quit the evaliation of this expression
+            return None,None # Quit the evaluation of this expression
+    elif len(summary['flux'][idx]) == 2: # min/max range of fluxes
+        ave_flux = np.mean(flux,0)
+        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), ave_flux)
+        pred_flux = kcat*pred_occu*enz
+        npars = len(current)+len(kcat)
+        if ncond>npars:
+            likelihood = (1/(flux[0]-flux[1]))*range_PDF(pred_flux, flux, ncond, npars)
+            return np.sum(np.log(likelihood)),kcat
+        else:
+            return None,None # Quit the evaluation of this expression
 
 #%% Fit reaction equation using MCMC-NNLS
 # Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
