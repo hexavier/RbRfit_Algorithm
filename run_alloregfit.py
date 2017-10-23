@@ -20,11 +20,18 @@ reg_coli = pd.read_csv(data_dir+"SMRN.csv",index_col="rxn_id")
 s = time()
 summary,bools = arf.define_reactions(rxn_id,model,fluxes,proteins,metabolites)
 candidates = arf.define_candidates(rxn_id,reg_coli,metabolites,bools)
-markov_par = {'freq':10,'nrecord':10,'burn_in':0} # Record once every 20 samples, 200 samples, skip 0 first samples
+markov_par = {'freq':200,'nrecord':20,'burn_in':0} # Record once every 20 samples, 200 samples, skip 0 first samples
 e = time()
 print('Load summary and candidates: %fs' % (e-s))
-#%%
+
+#%% Run fit without regulators
+#s = time()
+#results = arf.fit_reactions(summary,model,markov_par)
+#e = time()
+#print('Fit reaction MCMC-NNLS: %fs' % (e-s))
+
+#%% Run fit with regulators
 s = time()
-results = arf.fit_reactions(summary,model,markov_par,candidates)
+results = arf.fit_reactions(summary,model,markov_par,candidates,maxreg=1,coop=True)
 e = time()
 print('Fit reaction MCMC-NNLS: %fs' % (e-s))
