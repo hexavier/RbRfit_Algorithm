@@ -389,9 +389,9 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         if ncond>npars:
             var = np.sum((flux-pred_flux)**2)/(ncond-npars)
             likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
-            return np.sum(np.log(likelihood)),kcat
+            return np.sum(np.log(likelihood)),kcat,pred_flux
         else:
-            return None,None # Quit the evaluation of this expression
+            return None,None,None # Quit the evaluation of this expression
     elif len(summary['flux'][idx]) == 2: # min/max range of fluxes
         ave_flux = np.mean(flux,0)
         kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), ave_flux)
@@ -399,9 +399,9 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         npars = len(current)+len(kcat)
         if ncond>npars:
             likelihood = (1/(flux[0]-flux[1]))*range_PDF(pred_flux, flux, ncond, npars)
-            return np.sum(np.log(likelihood)),kcat
+            return np.sum(np.log(likelihood)),kcat,pred_flux
         else:
-            return None,None # Quit the evaluation of this expression
+            return None,None,None # Quit the evaluation of this expression
 
 #%% Fit reaction equation using MCMC-NNLS
 # Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
@@ -411,12 +411,11 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
 def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates=None,regulator=None):
     print('Running MCMC-NNLS for reaction %d... Candidate regulator: %s' % (idx,regulator))
     colnames = list(parameters['parameters'].values)
-    colnames.append('kcat')
-    colnames.append('likelihood')
+    colnames.extend(['kcat','likelihood','pred_flux'])
     track = pd.DataFrame(columns=colnames)
     current_pars = [None] * len(parameters)
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
-    current_lik,cur_kcat = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
+    current_lik,cur_kcat,cur_pred_flux = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
     if current_lik is None:
         print('Number of parameters outpaces the number of conditions.')
         return None # Quit the evaliation of this expression
@@ -424,17 +423,17 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
         for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
             for p in range(len(parameters)):
                 proposed_pars = draw_par([p], parameters, current_pars)
-                proposed_lik,pro_kcat = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
+                proposed_lik,pro_kcat,pro_pred_flux = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
                 if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
                     (proposed_lik > current_lik) or ((proposed_lik==current_lik)and(proposed_lik==-np.inf))):
                     current_pars = proposed_pars
                     cur_kcat = pro_kcat
+                    cur_pred_flux = pro_pred_flux
                     current_lik = proposed_lik
             if (i > markov_par['burn_in']):
                 if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
                     add_pars = list(map(lambda x: 2**x, current_pars))
-                    add_pars.extend(cur_kcat)
-                    add_pars.append(current_lik)
+                    add_pars.extend(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux)
                     track = track.append(pd.DataFrame([add_pars],columns=colnames))
         track.reset_index(drop=True,inplace=True)
         return track
@@ -444,7 +443,8 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
 
 def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
-    results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','best_fit','best_lik'])
+    results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','equation',\
+                                    'meas_flux','pred_flux','best_fit','best_lik'])
     for idx in list(summary.index):
         expr,parameters,regulator = write_rate_equations(idx,summary,model,candidates,maxreg,coop)
         for i in range(len(expr)):
@@ -456,7 +456,8 @@ def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
                 max_lik = max(track['likelihood'].values)
                 max_par = track[track['likelihood'].values==max_lik]
                 add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
-                       'regulator':regulator[i],'best_fit':max_par,'best_lik':max_lik}
+                       'regulator':regulator[i],'equation':expr[i],'meas_flux':summary['flux'][idx],\
+                       'pred_flux':max_par.iloc[:,-1].values,'best_fit':max_par.iloc[:,:-2],'best_lik':max_lik}
                 results = results.append([add])
     results = results.set_index('idx')
     results = results.sort_values(by='best_lik')
