@@ -28,7 +28,7 @@ class TestAlloRegFit(unittest.TestCase):
     def test_size(self):
         self.assertEqual(summary.shape, (8, 7))
         self.assertEqual(candidates.shape, (8, 4))
-        self.assertEqual(results.shape, (22, 5))
+        self.assertEqual(results.shape, (22, 8))
         
     def test_results(self):
         mean = np.mean(results['best_lik'])
