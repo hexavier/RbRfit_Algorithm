@@ -4,6 +4,7 @@
 import pandas as pd
 import sympy as sym
 import numpy as np
+from obonet import read_obo
 from numpy.random import uniform
 from scipy.stats import norm
 from scipy.optimize import nnls
@@ -26,8 +27,8 @@ def extract_info_df(molecules, dataset, mol_type):
             gene = list(mapping[((mapping[0]==gene[0][0]) & (mapping[1]=='Gene_Name'))][2])
             if any(gene[0] in s for s in [dataset.index.values]):
                 mol_df.append(dataset.loc[gene[0]].values)
-                names.append(gene)
-                mol_bool = (mol_bool & np.isnan(dataset.loc[gene[0]].values)==0)
+                names.append(gene[0])
+                mol_bool = (mol_bool & (np.isnan(dataset.loc[gene[0]].values)==0))
     else:
         for j in range(len(molecules)):
             met = molecules[j].id[:-2] #strip compartment letter from id
@@ -36,17 +37,92 @@ def extract_info_df(molecules, dataset, mol_type):
               (any(met in s for s in ['h','h2o'])==0))):
                     mol_df.append(dataset.loc[met].values)
                     names.append(molecules[j].id)
-                    mol_bool = (mol_bool & np.isnan(dataset.loc[met].values)==0)
+                    mol_bool = (mol_bool & (np.isnan(dataset.loc[met].values)==0))
     mol_df = pd.DataFrame(mol_df,columns = dataset.columns, index = names)
     return mol_df, mol_bool
     
+#%% Determine binding site
+# For all metabolites involved in reaction, determine the binding site.
+# Inputs: reactants, products, model.
+    
+def get_binding_sites(rxn_id,model):
+    obo_map = read_obo("chebi_lite.obo")
+    bigg_chebi = pd.read_csv("bigg_to_chebi2.csv", index_col = 'bigg_id')
+    binding_site = []
+    for i in range(len(rxn_id)):
+        all_met = [x.id for x in model.reactions.get_by_id(rxn_id[i]).metabolites.keys()]
+        all_met = [s for s in all_met if s not in ['h_c','h2o_c','pi_c']]
+        bs_array = np.zeros([len(all_met),len(all_met)])
+        all_chebi = list(map(lambda x: int(bigg_chebi.loc[x]),all_met))
+        id_to_altid = {id_:data['alt_id'] for id_, data in obo_map.nodes(data=True) if any('alt_id' in s for s in list(data.keys()))}
+        altid_to_id = {}
+        for k,v in id_to_altid.items():
+            for alt in v:
+                altid_to_id[alt]=k
+        ori_id = [altid_to_id[str('CHEBI:%i' % ori)] if any(str('CHEBI:%i' % ori) in s for s in list(altid_to_id.keys())) else str('CHEBI:%i'%ori) for ori in all_chebi]
+        for r,met1 in enumerate(ori_id):
+            neigh1 = obo_map.successors(met1)
+            for j,met2 in enumerate(ori_id):
+                neigh2 = obo_map.successors(met2)
+                if any([True for n1, n2 in zip(neigh1, neigh2) if n1 == n2]) and r<=j:
+                    bs_array[r,j] = 1
+        bind_site = []
+        all_met = np.array(all_met)
+        while (all_met.shape[0])>1:
+            bind_site.append(list(all_met[bs_array[0]==1]))
+            all_met = all_met[bs_array[0,:]==0]
+            bs_array = bs_array[1:,bs_array[0,:]==0]
+        else:
+            if (all_met.shape[0])>0:
+                bind_site.append([str(all_met[0])])
+            
+        print(model.reactions.get_by_id(rxn_id[i]).reaction)
+        print(bind_site)
+        yes_no = input('Is this binding site correct?[y/n] --> ')
+        if yes_no=='n':
+            all_met = [x.id for x in model.reactions.get_by_id(rxn_id[i]).metabolites.keys()]
+            all_met = [s for s in all_met if s not in ['h_c','h2o_c','pi_c']]
+            num_bs = input('How many binding sites are there? --> ')
+            bind_site = []
+            for r,met in enumerate(all_met):
+                print('%i: %s' % (r+1,met))
+            for j in range(int(num_bs)):
+                if j==0:
+                    bs = input('Molecules in the first binding site. Ex:1,3 --> ')
+                    add = []
+                    for r in bs.split(','):
+                        add.append(str('%s' % all_met[int(r)-1]))
+                    bind_site.append(add)
+                elif j==1:
+                    bs = input('Molecules in the second binding site. Ex:1,3 --> ')
+                    add = []
+                    for r in bs.split(','):
+                        add.append(str('%s' % all_met[int(r)-1]))
+                    bind_site.append(add)
+                elif j==2:
+                    bs = input('Molecules in the third binding site. Ex:1,3 --> ')
+                    add = []
+                    for r in bs.split(','):
+                        add.append(str('%s' % all_met[int(r)-1]))
+                    bind_site.append(add)
+                elif j>2:
+                    bs = input(str('Molecules in the %ith binding site. Ex:1,3 --> ' % (j+1)))
+                    add = []
+                    for r in bs.split(','):
+                        add.append(str('%s' % all_met[int(r)-1]))
+                    bind_site.append(add)
+        binding_site.append(bind_site)
+                
+    return binding_site
+
 #%% Define reactions
 # For each of the reactions, the function creates a data frame where every row constitutes a reaction.
 # Inputs: list of reaction ids that will be analyzed, stoichiometric model, DataFrame containing fluxes x conditions,
 # DataFrame containing prot x cond, and DataFrame with metabolites x cond.
 
-def define_reactions(rxn_id, model, fluxes, prot, metab):
+def define_reactions(rxn_id, model, binding_site, fluxes, prot, metab):
     reaction, reactant, product, enzyme, flux, bools = ([] for l in range(6))
+    
     for i in range(len(rxn_id)):
         # Reaction value
         reaction.append(model.reactions.get_by_id(rxn_id[i]).reaction)
@@ -67,12 +143,6 @@ def define_reactions(rxn_id, model, fluxes, prot, metab):
         enzyme.append(enz_df.loc[:,bool_all])
         flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]).loc[:,bool_all])
         bools.append(bool_all)
-        
-    # Provisional binding site before we can automatize it:
-    binding_site = [[['fum_c','mal_L_c']],[['6pgc_c'],['nadp_c','nadph_c']]\
-                    ,[['mal_L_c'],['nad_c','nadh_c']],[['atp_c','adp_c'],['f6p_c','fdp_c']]\
-                    ,[['g6p_c','f6p_c']],[['atp_c','amp_c'],['pyr_c','pep_c']]\
-                    ,[['adp_c','atp_c'],['pep_c','pyr_c']],[['r5p_c']]]
     
     summary = pd.DataFrame({'idx':range(len(rxn_id)),'reaction':reaction,'rxn_id':rxn_id,\
                             'reactant':reactant,'product':product,\
@@ -223,12 +293,13 @@ def write_rate_equations(idx,summary, model, candidates=None, nreg=1, coop=False
     for i,site in enumerate(summary['binding_site'][idx]):
         den_site = sym.sympify('1')
         for met in summary['binding_site'][idx][i]:
-            exp = int(abs(reaction.get_coefficient(met)))
-            for j in range(1, (exp+1)):
-                R = str('c_%s' % met)
-                K = str('K_%s' % met)
-                den_site += sym.sympify('('+R+'/'+K+')**'+str(j))
-                parameters.append(K), species.append(met), speciestype.append('met')
+            if any(met in s for s in substrate+product):
+                exp = int(abs(reaction.get_coefficient(met)))
+                for j in range(1, (exp+1)):
+                    R = str('c_%s' % met)
+                    K = str('K_%s' % met)
+                    den_site += sym.sympify('('+R+'/'+K+')**'+str(j))
+                    parameters.append(K), species.append(met), speciestype.append('met')
         den *= den_site
         
     # Paste all the parts together:
@@ -379,26 +450,28 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
                 vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
         
     f = sym.lambdify(vbles, occu)
+    bool_all =(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
+    ncond = np.sum(bool_all)
     pred_occu = f(*vbles_vals)
-    nenz = enz.shape[0]
     flux = summary['flux'][idx].values
     if len(summary['flux'][idx]) == 1: # fluxes as point estimates
-        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), flux.reshape(ncond))
-        pred_flux = kcat*pred_occu*enz
+        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), flux[:,bool_all].reshape(ncond))
+        pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
         npars = len(current)+len(kcat)
         if ncond>npars:
-            var = np.sum((flux-pred_flux)**2)/(ncond-npars)
-            likelihood = norm.pdf(flux, pred_flux, np.sqrt(var))
+            var = np.sum((flux[:,bool_all]-pred_flux)**2)/(ncond-npars)
+            likelihood = norm.pdf(flux[:,bool_all], pred_flux, np.sqrt(var))
             return np.sum(np.log(likelihood)),kcat,pred_flux
         else:
             return None,None,None # Quit the evaluation of this expression
     elif len(summary['flux'][idx]) == 2: # min/max range of fluxes
         ave_flux = np.mean(flux,0)
-        kcat, residual = nnls((pred_occu*enz).reshape((ncond,nenz)), ave_flux)
-        pred_flux = kcat*pred_occu*enz
+        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), ave_flux[:,bool_all])
+        pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
         npars = len(current)+len(kcat)
         if ncond>npars:
-            likelihood = (1/(flux[0]-flux[1]))*range_PDF(pred_flux, flux, ncond, npars)
+            likelihood = (1/(flux[0,bool_all]-flux[1,bool_all]))*range_PDF(pred_flux, flux[:,bool_all], ncond, npars)
             return np.sum(np.log(likelihood)),kcat,pred_flux
         else:
             return None,None,None # Quit the evaluation of this expression
@@ -433,7 +506,7 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
             if (i > markov_par['burn_in']):
                 if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
                     add_pars = list(map(lambda x: 2**x, current_pars))
-                    add_pars.extend(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux)
+                    add_pars.append(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux)
                     track = track.append(pd.DataFrame([add_pars],columns=colnames))
         track.reset_index(drop=True,inplace=True)
         return track
