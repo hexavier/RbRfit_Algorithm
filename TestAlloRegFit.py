@@ -14,8 +14,9 @@ metabolites = pd.read_excel(data_dir+"metabolites.xlsx",index_col="name")
 proteins = pd.read_excel(data_dir+"proteins.xlsx",index_col="name")
 rxn_id = open(data_dir+'reactions.txt').read().splitlines()
 reg_coli = pd.read_csv(data_dir+"SMRN.csv",index_col="rxn_id")
+binding_site = [[['fum_c', 'mal_L_c']], [['6pgc_c', 'ru5p_D_c'], ['nadp_c', 'nadph_c'], ['co2_c']], [['mal_L_c', 'oaa_c'], ['nad_c', 'nadh_c']], [['atp_c', 'adp_c'], ['f6p_c', 'fdp_c']], [['g6p_c', 'f6p_c']], [['atp_c', 'amp_c'], ['pyr_c', 'pep_c']], [['adp_c', 'atp_c'], ['pep_c', 'pyr_c']], [['r5p_c', 'ru5p_D_c']]]
 
-summary,bools = arf.define_reactions(rxn_id,model,fluxes,proteins,metabolites)
+summary,bools = arf.define_reactions(rxn_id,model,binding_site,fluxes,proteins,metabolites)
 candidates = arf.define_candidates(rxn_id,reg_coli,metabolites,bools)
 markov_par = {'freq':10,'nrecord':20,'burn_in':0}
 
