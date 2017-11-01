@@ -562,17 +562,20 @@ def heatmap_across_conditions(results,rxn_id=None):
     ax = heatmap(heat_mat,cmap='jet',xticklabels=cond_names)
     if rxn_id is not None:
         ax.set_yticklabels(results['regulator'].values,rotation = 0, ha="right")
-    ax.set_title('Fit likelihood across conditions')
+        ax.set_title(str('%s: Fit likelihood across conditions' % rxn_id))
+    else:
+        ax.set_title('Fit likelihood across conditions')
     ax.set_xlabel('Conditions')
+    plt.show()
 
 #%% Plot predicted and measured fluxes
 # Plot predicted and measured fluxes across conditions.
 # Inputs: index, results dataframe, summary dataframe, standard deviation of fluxes.
     
-def plot_fit(idx,results,summary,fluxes_sd):
+def plot_fit(idx,results,fluxes_sd):
     react = results.loc[idx];
-    meas_flux = summary['flux'][idx].values
-    meas_flux_sd = fluxes_sd.loc[summary['rxn_id'][idx],summary['flux'][idx].columns]
+    meas_flux = react['meas_flux'].values
+    meas_flux_sd = fluxes_sd.loc[react['rxn_id'],react['meas_flux'].columns]
     pred_flux = react['pred_flux']
     ind = np.arange(meas_flux.shape[1])
     width = 0.35
@@ -580,8 +583,8 @@ def plot_fit(idx,results,summary,fluxes_sd):
     rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
     rects2 = ax.bar(ind + width, pred_flux[0].reshape(ind.shape), width, color='y')
     ax.set_ylabel('Flux (mmol*gCDW-1*h-1)')
-    ax.set_title('%s: Flux fit between predicted and measured data' % results['rxn_id'][idx])
+    ax.set_title('%s%s: Flux fit between predicted and measured data' % (results['rxn_id'][idx],results['regulator'][idx]))
     ax.set_xticks(ind + width / 2)
-    ax.set_xticklabels(list(summary['flux'][idx].columns),rotation = 30, ha="right")
+    ax.set_xticklabels(list(react['meas_flux'].columns),rotation = 30, ha="right")
     ax.legend((rects1, rects2), ('Measured', 'Predicted'))
     plt.show()
