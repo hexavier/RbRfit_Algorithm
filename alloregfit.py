@@ -167,7 +167,7 @@ def define_candidates(rxn_id,reg_coli,metab,bools,reg_other=None):
     act_coli, inh_coli, act_other, inh_other = ([] for l in range(4))
     for i in range(len(rxn_id)):
         if (any(rxn_id[i].lower() in s for s in [reg_coli.index.values])):
-            cand_coli = reg_coli.loc[rxn_id[i].lower()].reset_index()
+            cand_coli = reg_coli.loc[[rxn_id[i].lower()]].reset_index()
             act_coli_df,name_act_coli,inh_coli_df,name_inh_coli = ([] for l in range(4))
             for j,met in enumerate(list(cand_coli['metab'])):
                 if (any(met in s for s in [metab.index.values])):
