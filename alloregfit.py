@@ -469,9 +469,9 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         if ncond>npars:
             var = np.sum((flux[:,bool_all]-pred_flux)**2)/(ncond-npars)
             likelihood = norm.pdf(flux[:,bool_all], pred_flux, np.sqrt(var))
-            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood)
+            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
         else:
-            return None,None,None,None # Quit the evaluation of this expression
+            return None,None,None,None,None # Quit the evaluation of this expression
     elif len(summary['flux'][idx]) == 2: # min/max range of fluxes
         ave_flux = np.mean(flux,0)
         kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), ave_flux[:,bool_all])
@@ -479,9 +479,9 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         npars = len(current)+len(kcat)
         if ncond>npars:
             likelihood = (1/(flux[0,bool_all]-flux[1,bool_all]))*range_PDF(pred_flux, flux[:,bool_all], ncond, npars)
-            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood)
+            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
         else:
-            return None,None,None,None # Quit the evaluation of this expression
+            return None,None,None,None,None # Quit the evaluation of this expression
 
 #%% Fit reaction equation using MCMC-NNLS
 # Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
@@ -495,15 +495,15 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
     track = pd.DataFrame(columns=colnames)
     current_pars = [None] * len(parameters)
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
-    current_lik,cur_kcat,cur_pred_flux,cur_lik_cond = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
+    current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
     if current_lik is None:
         print('Number of parameters outpaces the number of conditions.')
-        return None # Quit the evaliation of this expression
+        return None,None # Quit the evaliation of this expression
     else:
         for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
             for p in range(len(parameters)):
                 proposed_pars = draw_par([p], parameters, current_pars)
-                proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
+                proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond,bool_all = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
                 if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
                     (proposed_lik > current_lik) or ((proposed_lik==current_lik)and(proposed_lik==-np.inf))):
                     current_pars = proposed_pars
@@ -517,7 +517,7 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
                     add_pars.append(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux); add_pars.append(cur_lik_cond)
                     track = track.append(pd.DataFrame([add_pars],columns=colnames))
         track.reset_index(drop=True,inplace=True)
-        return track
+        return track,bool_all
 
 #%% Fit reaction equations
 # Run all required functions as a block to fit predicted to measured flux.
@@ -530,14 +530,14 @@ def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
         expr,parameters,regulator = write_rate_equations(idx,summary,model,candidates,maxreg,coop)
         for i in range(len(expr)):
             parameters[i] = build_priors(parameters[i],idx,summary,model,candidates)
-            track = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i])
+            track,bool_all = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i])
             if track is None:
                 continue # Quit the evaliation of this expression
             else:
                 max_lik = max(track['likelihood'].values)
                 max_par = track[track['likelihood'].values==max_lik]
                 add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
-                       'regulator':regulator[i],'equation':expr[i],'meas_flux':summary['flux'][idx],\
+                       'regulator':regulator[i],'equation':sym.latex(expr[i]['vmax']*expr[i]['occu']),'meas_flux':summary['flux'][idx].loc[:,bool_all],\
                        'pred_flux':max_par.iloc[:,-2].values,'best_fit':max_par.iloc[:,:-3],'best_lik':max_lik,\
                        'lik_cond':max_par.iloc[:,-1].values[0]}
                 results = results.append([add])
@@ -549,7 +549,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
 # Take results and plot them as a heatmap.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
 
-def heatmap_across_conditions(results,rxn_id=None):
+def heatmap_across_conditions(results,rxn_id=None,save=False):
     if rxn_id is not None:
         results = results.loc[results['rxn_id']==rxn_id]
     cond = np.array(list(map(lambda x: x.size,list(results['meas_flux'].values))))
@@ -560,31 +560,41 @@ def heatmap_across_conditions(results,rxn_id=None):
         heat_mat = heat_mat.append(add)
     fig, ax = plt.subplots()
     ax = heatmap(heat_mat,cmap='jet',xticklabels=cond_names)
+    ax.set_xlabel('Conditions')
     if rxn_id is not None:
-        ax.set_yticklabels(results['regulator'].values,rotation = 0, ha="right")
+        ax.set_yticklabels(results['regulator'].values[::-1],rotation = 0, ha="right")
         ax.set_title(str('%s: Fit likelihood across conditions' % rxn_id))
+        if save:
+            fig.savefig(rxn_id+'_heat.pdf', bbox_inches='tight')
     else:
         ax.set_title('Fit likelihood across conditions')
-    ax.set_xlabel('Conditions')
+        if save:
+            fig.savefig('all_heatmap.pdf', bbox_inches='tight')
     plt.show()
+    
 
 #%% Plot predicted and measured fluxes
 # Plot predicted and measured fluxes across conditions.
 # Inputs: index, results dataframe, summary dataframe, standard deviation of fluxes.
     
-def plot_fit(idx,results,fluxes_sd):
+def plot_fit(idx,results,fluxes_sd=None,save=False):
     react = results.loc[idx];
     meas_flux = react['meas_flux'].values
-    meas_flux_sd = fluxes_sd.loc[react['rxn_id'],react['meas_flux'].columns]
     pred_flux = react['pred_flux']
     ind = np.arange(meas_flux.shape[1])
     width = 0.35
     fig, ax = plt.subplots()
-    rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
+    if fluxes_sd is None:
+        rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r')
+    else:
+        meas_flux_sd = fluxes_sd.loc[react['rxn_id'],react['meas_flux'].columns]
+        rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
     rects2 = ax.bar(ind + width, pred_flux[0].reshape(ind.shape), width, color='y')
     ax.set_ylabel('Flux (mmol*gCDW-1*h-1)')
     ax.set_title('%s%s: Flux fit between predicted and measured data' % (results['rxn_id'][idx],results['regulator'][idx]))
     ax.set_xticks(ind + width / 2)
     ax.set_xticklabels(list(react['meas_flux'].columns),rotation = 30, ha="right")
     ax.legend((rects1, rects2), ('Measured', 'Predicted'))
+    if save:
+        fig.savefig('barflux'+str(idx)+'.pdf', bbox_inches='tight')
     plt.show()
