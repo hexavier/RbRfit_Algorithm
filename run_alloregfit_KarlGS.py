@@ -8,11 +8,11 @@ from time import time
 cond = ['glc-NCM3722_1','glc-NQ1243_3','glc-NQ1243_4','glc-NQ1243_5','glu-NCM3722_9','glu-NQ393_11','glu-NQ393_12','glu-NQ393_13','glu-NQ393_14']
 data_dir = "C:/Users/user/polybox/MASTER/THESIS/3_Karl_data/"
 model = cobra.io.load_matlab_model(data_dir+"iJO1366.mat")
-fluxes = pd.read_excel(data_dir+"fluxes_C13.xlsx",index_col="name")[cond]
+fluxes = pd.read_excel(data_dir+"fluxes_GS_nozeros.xlsx",index_col="name")[cond]
 metabolites = pd.read_excel(data_dir+"merged_metabolites.xlsx",index_col="name")[cond]
-proteins = pd.read_excel(data_dir+"proteome.xlsx",index_col="name")[cond]
+proteins = pd.read_excel(data_dir+"proteome_noNaN.xlsx",index_col="name")[cond]
 mapping = pd.read_table(data_dir+"ECOLI_83333_idmapping.dat",header=None)
-rxn_id = open(data_dir+'reactions.txt').read().splitlines()
+rxn_id = open(data_dir+'reactions_GS.txt').read().splitlines()
 reg_coli = pd.read_csv(data_dir+"SMRN.csv",index_col="rxn_id")
 
 s = time()
@@ -30,4 +30,4 @@ results = arf.fit_reactions(summary,model,markov_par,candidates)#,candidates,max
 e = time()
 print('Fit reaction MCMC-NNLS: %fs' % (e-s))
 
-results.to_pickle(data_dir+'fit_1_candidates.pickle')
+results.to_pickle(data_dir+'GS_fit_1_candidates.pickle')
