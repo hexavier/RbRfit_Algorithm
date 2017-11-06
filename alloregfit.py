@@ -549,7 +549,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
 # Take results and plot them as a heatmap.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
 
-def heatmap_across_conditions(results,rxn_id=None,save=False):
+def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
     if rxn_id is not None:
         results = results.loc[results['rxn_id']==rxn_id]
     cond = np.array(list(map(lambda x: x.size,list(results['meas_flux'].values))))
@@ -565,11 +565,11 @@ def heatmap_across_conditions(results,rxn_id=None,save=False):
         ax.set_yticklabels(results['regulator'].values[::-1],rotation = 0, ha="right")
         ax.set_title(str('%s: Fit likelihood across conditions' % rxn_id))
         if save:
-            fig.savefig(rxn_id+'_heat.pdf', bbox_inches='tight')
+            fig.savefig(save_dir+rxn_id+'_heat.pdf', bbox_inches='tight')
     else:
         ax.set_title('Fit likelihood across conditions')
         if save:
-            fig.savefig('all_heatmap.pdf', bbox_inches='tight')
+            fig.savefig(save_dir+'all_heatmap.pdf', bbox_inches='tight')
     plt.show()
     
 
@@ -577,7 +577,7 @@ def heatmap_across_conditions(results,rxn_id=None,save=False):
 # Plot predicted and measured fluxes across conditions.
 # Inputs: index, results dataframe, summary dataframe, standard deviation of fluxes.
     
-def plot_fit(idx,results,fluxes_sd=None,save=False):
+def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
     react = results.loc[idx];
     meas_flux = react['meas_flux'].values
     pred_flux = react['pred_flux']
@@ -596,5 +596,5 @@ def plot_fit(idx,results,fluxes_sd=None,save=False):
     ax.set_xticklabels(list(react['meas_flux'].columns),rotation = 30, ha="right")
     ax.legend((rects1, rects2), ('Measured', 'Predicted'))
     if save:
-        fig.savefig('barflux'+str(idx)+'.pdf', bbox_inches='tight')
+        fig.savefig(save_dir+'barflux'+str(idx)+'.pdf', bbox_inches='tight')
     plt.show()
