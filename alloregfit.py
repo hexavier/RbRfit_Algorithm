@@ -5,13 +5,14 @@ import pandas as pd
 import sympy as sym
 import numpy as np
 from obonet import read_obo
-from numpy.random import uniform
+from numpy.random import uniform,normal
 from scipy.stats import norm
 from scipy.optimize import nnls
 from scipy.integrate import quad
 from math import pi,e
 import matplotlib.pyplot as plt
 from seaborn import heatmap
+from matplotlib import cm
 
 #%% Extract available molecules
 # For all the molecules involved in the reaction, extract the corresponding omics data.
@@ -234,22 +235,28 @@ def write_reg_expr(regulators,reg_type,coop=False):
 # Inputs: candidates dataframe
 def add_regulators(idx,candidates,coop=False):
     add, newframe, reg = ([] for l in range(3))
-    if str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
-        act_coli = list(candidates['act_coli'][idx].index)
-        add1, newframe1, reg1 = write_reg_expr(act_coli,'activator',coop)
-        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
-    if str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
-        inh_coli = list(candidates['inh_coli'][idx].index)
-        add1, newframe1, reg1 = write_reg_expr(inh_coli,'inhibitor',coop)
-        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
-    if str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
-        act_other = list(candidates['act_other'][idx].index)
-        add1, newframe1, reg1 = write_reg_expr(act_other,'activator',coop)
-        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
-    if str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>":
-        inh_other = list(candidates['inh_other'][idx].index)
-        add1, newframe1, reg1 = write_reg_expr(inh_other,'inhibitor',coop)
-        add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    if (list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']):
+        if isinstance(candidates['act_coli'][idx],pd.DataFrame):
+            act_coli = list(candidates['act_coli'][idx].index)
+            add1, newframe1, reg1 = write_reg_expr(act_coli,'activator',coop)
+            add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+        if isinstance(candidates['inh_coli'][idx],pd.DataFrame):
+            inh_coli = list(candidates['inh_coli'][idx].index)
+            add1, newframe1, reg1 = write_reg_expr(inh_coli,'inhibitor',coop)
+            add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+        if isinstance(candidates['act_other'][idx],pd.DataFrame):
+            act_other = list(candidates['act_other'][idx].index)
+            add1, newframe1, reg1 = write_reg_expr(act_other,'activator',coop)
+            add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+        if isinstance(candidates['inh_other'][idx],pd.DataFrame):
+            inh_other = list(candidates['inh_other'][idx].index)
+            add1, newframe1, reg1 = write_reg_expr(inh_other,'inhibitor',coop)
+            add.extend(add1); newframe.extend(newframe1); reg.extend(reg1)
+    else:
+        cand = list(map(lambda x: x+'_c',list(candidates.index)))
+        add1, newframe1, reg1 = write_reg_expr(cand,'activator',coop)
+        add2, newframe2, reg2 = write_reg_expr(cand,'inhibitor',coop)
+        add.extend(add1+add2); newframe.extend(newframe1+newframe2); reg.extend(reg1+reg2)
     return add, newframe, reg
     
 #%% Write Rate Equations
@@ -344,7 +351,7 @@ def write_rate_equations(idx,summary, model, candidates=None, nreg=1, coop=False
 # For each of the parameters, define the prior/proposal distribution needed for MCMC.
 # Inputs: dataframe with parameters, summary generated in define_reactions, the 
 # stoichiometric model, and candidate dataframe.            
-def build_priors(param, idx, summary, model, candidates=None):
+def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
     reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
     distribution, par1, par2 = ([] for i in range(3))
     for i,par in enumerate(param['parameters']):
@@ -356,24 +363,29 @@ def build_priors(param, idx, summary, model, candidates=None):
             elif any(param['species'][i] in s for s in [summary['product'][idx].index.values]):
                 par1.append(-15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
                 par2.append(15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
-            elif (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(param['species'][i] in s for s in [candidates['act_coli'][idx].index.values])):
-                par1.append(-15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
-                par2.append(15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
-            elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(param['species'][i] in s for s in [candidates['inh_coli'][idx].index.values])):
-                par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
-                par2.append(15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
-            elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(param['species'][i] in s for s in [candidates['act_other'][idx].index.values])):
-                par1.append(-15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
-                par2.append(15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
-            elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(param['species'][i] in s for s in [candidates['inh_other'][idx].index.values])):
-                par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
-                par2.append(15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
+            elif (candidates is not None):
+                if list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']:
+                    if (isinstance(candidates['act_coli'][idx],pd.DataFrame)) and \
+                    (any(param['species'][i] in s for s in [candidates['act_coli'][idx].index.values])):
+                        par1.append(-15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
+                        par2.append(15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
+                    elif (isinstance(candidates['inh_coli'][idx],pd.DataFrame)) and \
+                    (any(param['species'][i] in s for s in [candidates['inh_coli'][idx].index.values])):
+                        par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
+                        par2.append(15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
+                    elif (isinstance(candidates['act_other'][idx],pd.DataFrame)) and \
+                    (any(param['species'][i] in s for s in [candidates['act_other'][idx].index.values])):
+                        par1.append(-15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
+                        par2.append(15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
+                    elif (isinstance(candidates['inh_other'][idx],pd.DataFrame)) and \
+                    (any(param['species'][i] in s for s in [candidates['inh_other'][idx].index.values])):
+                        par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
+                        par2.append(15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
+                else:
+                    cond = summary['flux'][idx].columns.values
+                    par1.append(-15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
+                    par2.append(15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
         elif param['speciestype'][i] == 'K_eq':
-            distribution.append('unif')
             Q_r = 1
             for subs in list(summary['reactant'][idx].index):
                 Q_r /= (summary['reactant'][idx].loc[subs].values)**abs(reaction.get_coefficient(subs))
@@ -381,8 +393,21 @@ def build_priors(param, idx, summary, model, candidates=None):
             if products:
                 for prod in products:
                     Q_r *= (summary['product'][idx].loc[prod].values)**abs(reaction.get_coefficient(prod))
-                par1.append(-20.0+np.log2(np.nanmedian(Q_r)))
-                par2.append(20.0+np.log2(np.nanmedian(Q_r)))
+                if priorKeq==False:
+                    distribution.append('unif')
+                    par1.append(-20.0+np.log2(np.nanmedian(Q_r)))
+                    par2.append(20.0+np.log2(np.nanmedian(Q_r)))
+                else:
+                    priorKeqs = pd.read_csv('Keq_bigg.csv',index_col='bigg_id')
+                    bools = np.array(list(isinstance(x,str) for x in list(priorKeqs.index.values)))
+                    if any(summary['rxn_id'][idx] in s for s in list(priorKeqs.loc[bools].index)):
+                        distribution.append('norm')
+                        par1.append(np.log2(float(priorKeqs.loc[summary['rxn_id'][idx],'Keq'])))
+                        par2.append(np.abs(np.log2(float(priorKeqs.loc[summary['rxn_id'][idx],'Keq']))-np.log2(np.nanmedian(Q_r))))
+                    else:
+                        distribution.append('unif')
+                        par1.append(-20.0+np.log2(np.nanmedian(Q_r)))
+                        par2.append(20.0+np.log2(np.nanmedian(Q_r)))
         elif param['speciestype'][i] == 'hill':
             distribution.append('unif')
             par1.append(-3)
@@ -400,6 +425,8 @@ def draw_par(update, parameters, current):
     for par in update:
         if parameters['distribution'][par]=='unif':
             draw[par] = uniform(parameters['par1'][par],parameters['par2'][par])
+        elif parameters['distribution'][par]=='norm':
+            draw[par] = normal(parameters['par1'][par],parameters['par2'][par])
         else:
             print('Invalid distribution')
     return draw
@@ -439,23 +466,28 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
     if regulator:
         for reg in regulator:
             reg = reg[4:]
-            if (str(type(candidates['act_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+            if list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']:
+                if (isinstance(candidates['act_coli'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
+                elif (isinstance(candidates['inh_coli'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
+                elif (isinstance(candidates['act_other'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
+                elif (isinstance(candidates['inh_other'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
+            elif not (any('c_'+reg in s for s in vbles)):
+                cond = summary['flux'][idx].columns.values
                 vbles.append('c_'+reg)
-                vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
-            elif (str(type(candidates['inh_coli'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                vbles.append('c_'+reg)
-                vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
-            elif (str(type(candidates['act_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                vbles.append('c_'+reg)
-                vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
-            elif (str(type(candidates['inh_other'][idx]))=="<class 'pandas.core.frame.DataFrame'>") and \
-            (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
-                vbles.append('c_'+reg)
-                vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
-        
+                vbles_vals.append(candidates.loc[reg[:-2],cond].values)
+                
     f = sym.lambdify(vbles, occu)
     bool_all =(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
     vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
@@ -523,13 +555,13 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
 # Run all required functions as a block to fit predicted to measured flux.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
 
-def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
+def fit_reactions(summary,model,markov_par,priorKeq=False,candidates=None,maxreg=1,coop=False):
     results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','equation',\
                                     'meas_flux','pred_flux','best_fit','best_lik','lik_cond'])
     for idx in list(summary.index):
         expr,parameters,regulator = write_rate_equations(idx,summary,model,candidates,maxreg,coop)
         for i in range(len(expr)):
-            parameters[i] = build_priors(parameters[i],idx,summary,model,candidates)
+            parameters[i] = build_priors(parameters[i],idx,summary,model,priorKeq,candidates)
             track,bool_all = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i])
             if track is None:
                 continue # Quit the evaliation of this expression
@@ -547,7 +579,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,maxreg=1,coop=False):
 
 #%% Show heatmap across conditions
 # Take results and plot them as a heatmap.
-# Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
+# Inputs: results dataframe, reaction id.
 
 def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
     if rxn_id is not None:
@@ -575,26 +607,115 @@ def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
 
 #%% Plot predicted and measured fluxes
 # Plot predicted and measured fluxes across conditions.
-# Inputs: index, results dataframe, summary dataframe, standard deviation of fluxes.
+# Inputs: index or reaction id, results dataframe, summary dataframe, standard deviation of fluxes.
     
 def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
-    react = results.loc[idx];
-    meas_flux = react['meas_flux'].values
-    pred_flux = react['pred_flux']
-    ind = np.arange(meas_flux.shape[1])
-    width = 0.35
+    if isinstance(idx,int):
+        react = results.iloc[[idx]]
+        width = 0.4
+    elif isinstance(idx,str):
+        react = results.loc[results['rxn_id']==idx][::-1]
+        width = 0.8/(len(react)+1)
+    meas_flux = react['meas_flux']
+    pred_flux = react['pred_flux'].values
+    sizes = list(map(lambda x:react['meas_flux'].iloc[x].shape[1],list(np.arange(len(react['meas_flux'])))))
+    ind = np.arange(max(sizes))
     fig, ax = plt.subplots()
     if fluxes_sd is None:
-        rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r')
+        plt.bar(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), width, color='r')
     else:
-        meas_flux_sd = fluxes_sd.loc[react['rxn_id'],react['meas_flux'].columns]
-        rects1 = ax.bar(ind, meas_flux.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
-    rects2 = ax.bar(ind + width, pred_flux[0].reshape(ind.shape), width, color='y')
+        meas_flux_sd = fluxes_sd.loc[react['rxn_id'].iloc[0],meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns]
+        plt.bar(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
+    if isinstance(idx,int):
+        plt.bar(ind + width, pred_flux[0][0].reshape(ind.shape), width, color='y')
+        plt.legend(['Measured', 'Predicted'])
+        ax.set_title('%s%s: Flux fit between predicted and measured data' % (results['rxn_id'][idx],results['regulator'][idx]))
+    elif isinstance(idx,str):
+        colors = cm.summer(np.arange(len(react))/len(react))
+        for i in range(len(react)):
+            if len(pred_flux[i][0]) < max(sizes):
+                formated = np.array([0.0]*max(sizes))
+                allcond = list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns)
+                bools = np.array([False]*max(sizes))
+                for j,cond in enumerate(allcond):
+                    if any(cond in s for s in list(meas_flux.iloc[i].columns)):
+                        bools[j]=True
+                np.place(formated,bools,pred_flux[i][0])
+                plt.bar(ind + width*(1+i), formated.reshape(ind.shape), width, color = colors[i])
+            else:
+                plt.bar(ind + width*(1+i), pred_flux[i][0].reshape(ind.shape), width, color = colors[i])
+        plt.legend(['Measured']+list(react['regulator'].values))
+        ax.set_title('%s: Flux fit between predicted and measured data' % (react['rxn_id'].iloc[0]))
     ax.set_ylabel('Flux (mmol*gCDW-1*h-1)')
-    ax.set_title('%s%s: Flux fit between predicted and measured data' % (results['rxn_id'][idx],results['regulator'][idx]))
-    ax.set_xticks(ind + width / 2)
-    ax.set_xticklabels(list(react['meas_flux'].columns),rotation = 30, ha="right")
-    ax.legend((rects1, rects2), ('Measured', 'Predicted'))
+    ax.set_xticks(ind + 0.8 / 2)
+    ax.set_xticklabels(list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns),rotation = 30, ha="right")
     if save:
-        fig.savefig(save_dir+'barflux'+str(idx)+'.pdf', bbox_inches='tight')
+        fig.savefig(save_dir+'barflux_'+str(idx)+'.pdf', bbox_inches='tight')
     plt.show()
+    
+#%% Plot improvement of likelihood in best condition
+# Plot likelihood improvement 
+# Inputs: results dataframe, reaction id.
+    
+def plot_likelihood(results, cond=None, save=False, save_dir=''):
+    noreg = results.loc[results['regulator']==''].reset_index(drop=True)
+    if isinstance(cond,str):
+        bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(len(noreg))))))
+        noreg = noreg.loc[bool_cond].reset_index(drop=True)
+        bottom = np.array(list(map(lambda x: noreg['lik_cond'].iloc[x][0][cond==noreg['meas_flux'].iloc[x].columns][0],list(np.arange(len(noreg))))))
+        top = np.array([0.0]*len(bottom))
+        for i,rxn in enumerate(list(noreg['rxn_id'].values)):
+            rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
+            bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
+            rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
+            if (rxn_results.empty==False):
+                lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(len(rxn_results)))))
+                if bottom[i]<max(lik_values):
+                    top[i] = max(lik_values)-bottom[i]
+        xlabel = 'Reaction'
+        title = str('Likelihood improvement in condition %s' % (cond))
+        xticklabels = list(noreg['rxn_id'].values)
+        ind = np.arange(len(bottom))
+        fig, ax = plt.subplots()
+        width = 0.4
+        xticks = ind + 0.2
+        plt.bar(ind, bottom-min(bottom)+0.2, width, bottom=min(bottom)-0.2, color='r')
+        plt.bar(ind, top, width, bottom=bottom, color='y')
+    else:
+        min_value = np.min(np.concatenate(results['lik_cond'].values,1))
+        ncond = np.array(list(map(lambda x: noreg['meas_flux'].iloc[x].shape[1],list(np.arange(len(noreg))))))
+        conds = list(noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        ind = np.arange(noreg.shape[0])
+        top = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        bottom = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        fig, ax = plt.subplots()
+        title = 'Likelihood improvement'
+        width = 0.8/len(conds)
+        xticks = ind + 0.8 / 2
+        for j,cond in enumerate(conds):
+            bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(len(noreg))))))
+            noreg2 = noreg.loc[bool_cond].reset_index(drop=True)
+            bottom.loc[bool_cond,cond] = np.array(list(map(lambda x: noreg2['lik_cond'].iloc[x][0][cond==noreg2['meas_flux'].iloc[x].columns][0],list(np.arange(len(noreg2))))))
+            for i,rxn in enumerate(list(noreg2['rxn_id'].values)):
+                rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
+                bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
+                rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
+                if (rxn_results.empty==False):
+                    lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(len(rxn_results)))))
+                    if bottom.loc[rxn,cond]<max(lik_values):
+                        top.loc[rxn,cond] = max(lik_values)-bottom.loc[rxn,cond]
+            plt.bar(ind+width*(j), bottom[cond].values-min_value+0.2, width, bottom=min_value-0.2, color='r')
+            plt.bar(ind+width*(j), top[cond].values, width, bottom=bottom[cond].values, color='y')
+        
+    xlabel = 'Reaction'
+    xticklabels = list(noreg['rxn_id'].values)
+    ax.set_ylabel('Likelihood')
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels,rotation = 45, ha="right")
+    plt.legend(['General M-M','1 Regulator'],loc='upper left')
+    if save:
+        fig.savefig(save_dir+'improvement_'+str(cond)+'.pdf', bbox_inches='tight')
+    plt.show()
+    
