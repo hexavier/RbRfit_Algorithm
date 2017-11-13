@@ -6,21 +6,22 @@ import sympy as sym
 import numpy as np
 from obonet import read_obo
 from numpy.random import uniform,normal
-from scipy.stats import norm
+from scipy.stats import norm,chisqprob
 from scipy.optimize import nnls
 from scipy.integrate import quad
 from math import pi,e
 import matplotlib.pyplot as plt
 from seaborn import heatmap
 from matplotlib import cm
+import re
+from sklearn.linear_model import LogisticRegression
 
 #%% Extract available molecules
 # For all the molecules involved in the reaction, extract the corresponding omics data.
 # Inputs: molecules to extract info, omics dataframe, and type of molecule (reactant,
 # product or enzyme).
-def extract_info_df(molecules, dataset, mol_type):
-    mol_df = []
-    names = []
+def extract_info_df(molecules, dataset, sd, mol_type):
+    mol_df, sd_df, names = ([] for l in range(3))
     ncond = dataset.shape[1]
     mol_bool = [True]*ncond
     if mol_type=='enzyme':
@@ -30,6 +31,7 @@ def extract_info_df(molecules, dataset, mol_type):
             gene = list(mapping[((mapping[0]==gene[0][0]) & (mapping[1]=='Gene_Name'))][2])
             if any(gene[0] in s for s in [dataset.index.values]):
                 mol_df.append(dataset.loc[gene[0]].values)
+                if (sd is not None): sd_df.append(sd.loc[gene[0]].values)
                 names.append(gene[0])
                 mol_bool = (mol_bool & (np.isnan(dataset.loc[gene[0]].values)==0))
     else:
@@ -39,10 +41,15 @@ def extract_info_df(molecules, dataset, mol_type):
             ((mol_type=='product')and(any(met in s for s in [dataset.index.values]) and \
               (any(met in s for s in ['h','h2o'])==0))):
                     mol_df.append(dataset.loc[met].values)
+                    if (sd is not None): sd_df.append(sd.loc[met].values)
                     names.append(molecules[j].id)
                     mol_bool = (mol_bool & (np.isnan(dataset.loc[met].values)==0))
     mol_df = pd.DataFrame(mol_df,columns = dataset.columns, index = names)
-    return mol_df, mol_bool
+    if sd_df:
+        sd_df = pd.DataFrame(sd_df,columns = dataset.columns, index = names)
+    else:
+        sd_df = pd.DataFrame(np.zeros(mol_df.shape),columns = dataset.columns, index = names)
+    return mol_df,sd_df, mol_bool
     
 #%% Determine binding site
 # For all metabolites involved in reaction, determine the binding site.
@@ -123,27 +130,30 @@ def get_binding_sites(rxn_id,model):
 # Inputs: list of reaction ids that will be analyzed, stoichiometric model, DataFrame containing fluxes x conditions,
 # DataFrame containing prot x cond, and DataFrame with metabolites x cond.
 
-def define_reactions(rxn_id, model, fluxes, prot, metab, binding_site=None):
-    reaction, reactant, product, enzyme, flux, bools, bs = ([] for l in range(7))
+def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=None,binding_site=None):
+    reaction, reactant, reactant_sd, product, product_sd, enzyme, enzyme_sd, flux, bools, bs = ([] for l in range(10))
     
     for i in range(len(rxn_id)):
         # Reaction value
         reaction.append(model.reactions.get_by_id(rxn_id[i]).reaction)
         # Reactant values
         react = model.reactions.get_by_id(rxn_id[i]).reactants
-        react_df, react_bool = extract_info_df(react,metab,'reactant')
+        react_df,react_sd, react_bool = extract_info_df(react,metab,metab_sd,'reactant')
         # Product values
         prod = model.reactions.get_by_id(rxn_id[i]).products
-        prod_df, prod_bool = extract_info_df(prod,metab,'product')
+        prod_df,prod_sd, prod_bool = extract_info_df(prod,metab,metab_sd,'product')
         # Enzyme values
         enz = list(model.reactions.get_by_id(rxn_id[i]).genes)
-        enz_df, enz_bool = extract_info_df(enz,prot,'enzyme')
+        enz_df,enz_sd, enz_bool = extract_info_df(enz,prot,prot_sd,'enzyme')
         # Append all data
         flux_bool = np.isnan(fluxes.loc[rxn_id[i]].values)==0
         bool_all = (react_bool & prod_bool & enz_bool & flux_bool)
         reactant.append(react_df.loc[:,bool_all])
+        reactant_sd.append(react_sd.loc[:,bool_all])
         product.append(prod_df.loc[:,bool_all])
+        product_sd.append(prod_sd.loc[:,bool_all])
         enzyme.append(enz_df.loc[:,bool_all])
+        enzyme_sd.append(enz_sd.loc[:,bool_all])
         flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]).loc[:,bool_all])
         bools.append(bool_all)
         if binding_site is None:
@@ -153,8 +163,9 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, binding_site=None):
         binding_site=bs
         
     summary = pd.DataFrame({'idx':range(len(rxn_id)),'reaction':reaction,'rxn_id':rxn_id,\
-                            'reactant':reactant,'product':product,\
-                            'enzyme':enzyme,'flux':flux,'binding_site':binding_site})
+                            'reactant':reactant,'reactant_sd':reactant_sd,'product':product,\
+                            'product_sd':product_sd,'enzyme':enzyme,'enzyme_sd':enzyme_sd,\
+                            'flux':flux,'binding_site':binding_site})
     summary = summary.set_index('idx')
     return summary,bools
 
@@ -164,40 +175,58 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, binding_site=None):
 # for all rxn_id in E. coli, DataFrame with metabolites x cond, and DataFrame with
 # regulators for all rxn_id in other organisms (optional).
     
-def define_candidates(rxn_id,reg_coli,metab,bools,reg_other=None):
-    act_coli, inh_coli, act_other, inh_other = ([] for l in range(4))
+def define_candidates(rxn_id,reg_coli,metab,bools,metab_sd=None,reg_other=None):
+    act_coli,act_coli_sd, inh_coli,inh_coli_sd, act_other,act_other_sd, inh_other,inh_other_sd = ([] for l in range(8))
     for i in range(len(rxn_id)):
         if (any(rxn_id[i].lower() in s for s in [reg_coli.index.values])):
             cand_coli = reg_coli.loc[[rxn_id[i].lower()]].reset_index()
-            act_coli_df,name_act_coli,inh_coli_df,name_inh_coli = ([] for l in range(4))
+            act_coli_df,act_coli_sd_df,name_act_coli,inh_coli_df,inh_coli_sd_df,name_inh_coli = ([] for l in range(6))
             for j,met in enumerate(list(cand_coli['metab'])):
                 if (any(met in s for s in [metab.index.values])):
                     if cand_coli['mode'][j] == '-':
                         inh_coli_df.append(metab.loc[met].values)
+                        if (metab_sd is not None):
+                            inh_coli_sd_df.append(metab_sd.loc[met].values)
                         name_inh_coli.append(met+'_c')
                     elif cand_coli['mode'][j] == '+':
                         act_coli_df.append(metab.loc[met].values)
+                        if (metab_sd is not None):
+                            act_coli_sd_df.append(metab_sd.loc[met].values)
                         name_act_coli.append(met+'_c')
             inh_coli_df = pd.DataFrame(inh_coli_df,columns = metab.columns, index=name_inh_coli)
             act_coli_df = pd.DataFrame(act_coli_df,columns = metab.columns, index=name_act_coli)
+            if metab_sd is None:
+                inh_coli_sd_df = np.zeros(inh_coli_df.shape)
+                act_coli_sd_df = np.zeros(act_coli_df.shape)
+            inh_coli_sd_df = pd.DataFrame(inh_coli_sd_df,columns = metab.columns, index=name_inh_coli)
+            act_coli_sd_df = pd.DataFrame(act_coli_sd_df,columns = metab.columns, index=name_act_coli)
             if act_coli_df.empty:
                 act_coli.append('No data available for the candidate activators.')
+                act_coli_sd.append('No data available for the candidate activators.')
             else:
                 act_coli_df.drop_duplicates(inplace=True); act_coli.append(act_coli_df.loc[:,bools[i]])
+                act_coli_sd_df.drop_duplicates(inplace=True); act_coli_sd.append(act_coli_sd_df.loc[:,bools[i]])
             if inh_coli_df.empty:
                 inh_coli.append('No data available for the candidate activators.')
+                inh_coli_sd.append('No data available for the candidate activators.')
             else:
                 inh_coli_df.drop_duplicates(inplace=True); inh_coli.append(inh_coli_df.loc[:,bools[i]])
+                inh_coli_sd_df.drop_duplicates(inplace=True); inh_coli_sd.append(inh_coli_sd_df.loc[:,bools[i]])
         else:
             act_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
+            act_coli_sd.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
             inh_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
+            inh_coli_sd.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
         if reg_other is None:
             act_other.append([None]*len(rxn_id))
+            act_other_sd.append([None]*len(rxn_id))
             inh_other.append([None]*len(rxn_id))
+            inh_other_sd.append([None]*len(rxn_id))
         else:
             pass
-    candidates = pd.DataFrame({'idx':range(len(rxn_id)),'act_coli':act_coli,'inh_coli':inh_coli,\
-                            'act_other':act_other,'inh_other':inh_other})
+    candidates = pd.DataFrame({'idx':range(len(rxn_id)),'act_coli':act_coli,'act_coli_sd':act_coli_sd,\
+                               'inh_coli':inh_coli,'inh_coli_sd':inh_coli_sd,'act_other':act_other,\
+                               'act_other_sd':act_other_sd,'inh_other':inh_other,'inh_other_sd':inh_other_sd})
     candidates = candidates.set_index('idx')
     return candidates        
 
@@ -235,7 +264,8 @@ def write_reg_expr(regulators,reg_type,coop=False):
 # Inputs: candidates dataframe
 def add_regulators(idx,candidates,coop=False):
     add, newframe, reg = ([] for l in range(3))
-    if (list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']):
+    if (list(candidates.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+        'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']):
         if isinstance(candidates['act_coli'][idx],pd.DataFrame):
             act_coli = list(candidates['act_coli'][idx].index)
             add1, newframe1, reg1 = write_reg_expr(act_coli,'activator',coop)
@@ -364,7 +394,8 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
                 par1.append(-15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
                 par2.append(15.0+np.log2(np.nanmedian(summary['product'][idx].loc[param['species'][i]].values)))
             elif (candidates is not None):
-                if list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']:
+                if list(candidates.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+                           'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
                     if (isinstance(candidates['act_coli'][idx],pd.DataFrame)) and \
                     (any(param['species'][i] in s for s in [candidates['act_coli'][idx].index.values])):
                         par1.append(-15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
@@ -402,12 +433,10 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
                     bools = np.array(list(isinstance(x,str) for x in list(priorKeqs.index.values)))
                     if any(summary['rxn_id'][idx] in s for s in list(priorKeqs.loc[bools].index)):
                         distribution.append('norm')
-                        par1.append(np.log2(float(priorKeqs.loc[summary['rxn_id'][idx],'Keq'])))
-                        par2.append(np.abs(np.log2(float(priorKeqs.loc[summary['rxn_id'][idx],'Keq']))-np.log2(np.nanmedian(Q_r))))
+                        par1.append(float(priorKeqs.loc[summary['rxn_id'][idx],'Keq']))
+                        par2.append(float(priorKeqs.loc[summary['rxn_id'][idx],'stdev']))
                     else:
-                        distribution.append('unif')
-                        par1.append(-20.0+np.log2(np.nanmedian(Q_r)))
-                        par2.append(20.0+np.log2(np.nanmedian(Q_r)))
+                        print('No prior Keq value for reaction %s' % summary['rxn_id'][idx])
         elif param['speciestype'][i] == 'hill':
             distribution.append('unif')
             par1.append(-3)
@@ -424,7 +453,7 @@ def draw_par(update, parameters, current):
     draw = current
     for par in update:
         if parameters['distribution'][par]=='unif':
-            draw[par] = uniform(parameters['par1'][par],parameters['par2'][par])
+            draw[par] = 2**uniform(parameters['par1'][par],parameters['par2'][par])
         elif parameters['distribution'][par]=='norm':
             draw[par] = normal(parameters['par1'][par],parameters['par2'][par])
         else:
@@ -455,7 +484,7 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
     vbles_vals = []
     for par in list(parameters['parameters'].values):
         vbles.append(par)
-        rep_par = np.repeat(2**current[parameters['parameters'].values==par],ncond)
+        rep_par = np.repeat(current[parameters['parameters'].values==par],ncond)
         vbles_vals.append(rep_par)
     for sub in list(summary['reactant'][idx].index):
         vbles.append('c_'+sub)
@@ -466,7 +495,8 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
     if regulator:
         for reg in regulator:
             reg = reg[4:]
-            if list(candidates.columns.values)==['act_coli', 'act_other', 'inh_coli', 'inh_other']:
+            if list(candidates.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+                       'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
                 if (isinstance(candidates['act_coli'][idx],pd.DataFrame)) and \
                 (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
                     vbles.append('c_'+reg)
@@ -523,7 +553,7 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
 def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates=None,regulator=None):
     print('Running MCMC-NNLS for reaction %d... Candidate regulator: %s' % (idx,regulator))
     colnames = list(parameters['parameters'].values)
-    colnames.extend(['kcat','likelihood','pred_flux','lik_cond'])
+    colnames.extend(re.findall('K_cat_[a-zA-Z0-9_]+', str(equations['vmax']))+['likelihood','pred_flux','lik_cond'])
     track = pd.DataFrame(columns=colnames)
     current_pars = [None] * len(parameters)
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
@@ -545,17 +575,90 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
                     cur_lik_cond = pro_lik_cond
             if (i > markov_par['burn_in']):
                 if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
-                    add_pars = list(map(lambda x: 2**x, current_pars))
-                    add_pars.append(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux); add_pars.append(cur_lik_cond)
+                    add_pars = list(current_pars)
+                    add_pars.extend(cur_kcat); add_pars.append(current_lik); add_pars.append(cur_pred_flux); add_pars.append(cur_lik_cond)
                     track = track.append(pd.DataFrame([add_pars],columns=colnames))
         track.reset_index(drop=True,inplace=True)
         return track,bool_all
 
+#%% Calculate uncertainty of prediction
+# Based on the variances of species and predicted fluxes, estimate the uncertainty 
+# of the prediction using the multivariate delta method.
+# Inputs: idx, equation, parameter dataframe, summary and candidates dataframes, regulator, candidates_sd
+# in case all metabolites are being tested.
+def cal_uncertainty(idx, expr, parameters, summary, candidates=None, regulator=None, candidates_sd=None):
+    vbles,vbles_vals,sd_vals,species = ([] for l in range(4))
+    ncond = summary['enzyme'][idx].shape[1]
+    for par in range(parameters.shape[1]):
+        vbles.append(parameters.columns[par])
+        rep_par = np.repeat(parameters.iloc[0,par],ncond)
+        vbles_vals.append(rep_par)
+    for sub in list(summary['reactant'][idx].index):
+        vbles.append('c_'+sub); species.append('c_'+sub)
+        vbles_vals.append(summary['reactant'][idx].loc[sub].values)
+        sd_vals.append(summary['reactant_sd'][idx].loc[sub].values)
+    for prod in list(summary['product'][idx].index):
+        vbles.append('c_'+prod); species.append('c_'+prod)
+        vbles_vals.append(summary['product'][idx].loc[prod].values)
+        sd_vals.append(summary['product_sd'][idx].loc[prod].values)
+    for enz in list(summary['enzyme'][idx].index):
+        vbles.append('c_'+enz); species.append('c_'+enz)
+        vbles_vals.append(summary['enzyme'][idx].loc[enz].values)
+        sd_vals.append(summary['enzyme_sd'][idx].loc[enz].values)
+    if regulator:
+        for reg in regulator:
+            reg = reg[4:]
+            if list(candidates.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+                       'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
+                if (isinstance(candidates['act_coli'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['act_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg); species.append('c_'+reg)
+                    vbles_vals.append(candidates['act_coli'][idx].loc[reg].values)
+                    sd_vals.append(candidates['act_coli_sd'][idx].loc[reg].values)
+                elif (isinstance(candidates['inh_coli'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['inh_coli'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg); species.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_coli'][idx].loc[reg].values)
+                    sd_vals.append(candidates['inh_coli_sd'][idx].loc[reg].values)
+                elif (isinstance(candidates['act_other'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['act_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg); species.append('c_'+reg)
+                    vbles_vals.append(candidates['act_other'][idx].loc[reg].values)
+                    sd_vals.append(candidates['act_other_sd'][idx].loc[reg].values)
+                elif (isinstance(candidates['inh_other'][idx],pd.DataFrame)) and \
+                (any(reg in s for s in [candidates['inh_other'][idx].index.values])) and not (any('c_'+reg in s for s in vbles)):
+                    vbles.append('c_'+reg); species.append('c_'+reg)
+                    vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
+                    sd_vals.append(candidates['act_other_sd'][idx].loc[reg].values)
+            elif not (any('c_'+reg in s for s in vbles)):
+                cond = summary['flux'][idx].columns.values
+                vbles.append('c_'+reg); species.append('c_'+reg)
+                vbles_vals.append(candidates.loc[reg[:-2],cond].values)
+                sd_vals.append(candidates_sd.loc[reg[:-2],cond].values)
+    
+    bool_all =(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
+    ncond = np.sum(bool_all)
+    grads = np.zeros((ncond,len(species)))
+    expr = expr['vmax']*expr['occu']
+    uncertainty = np.zeros((1,ncond))
+    cov_matrix = np.zeros((len(species),len(species)))
+    for m,spe1 in enumerate(species):
+        gradient = sym.diff(expr,species[m])
+        f = sym.lambdify(vbles, gradient)
+        grads[:,m] = f(*vbles_vals)
+    for i in range(ncond):
+        for m,spe1 in enumerate(species):
+            for n,spe2 in enumerate(species):
+                if n>=m:
+                    cov_matrix[m,n] = sd_vals[m][i]*sd_vals[n][i]
+                    cov_matrix[n,m] = sd_vals[n][i]*sd_vals[m][i]
+        uncertainty[0,i] = np.dot(np.dot(grads[i],cov_matrix),np.transpose(grads[i]))
+    return uncertainty
 #%% Fit reaction equations
 # Run all required functions as a block to fit predicted to measured flux.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
-
-def fit_reactions(summary,model,markov_par,priorKeq=False,candidates=None,maxreg=1,coop=False):
+def fit_reactions(summary,model,markov_par,candidates=None,priorKeq=False,candidates_sd=None,maxreg=1,coop=False):
     results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','equation',\
                                     'meas_flux','pred_flux','best_fit','best_lik','lik_cond'])
     for idx in list(summary.index):
@@ -568,19 +671,83 @@ def fit_reactions(summary,model,markov_par,priorKeq=False,candidates=None,maxreg
             else:
                 max_lik = max(track['likelihood'].values)
                 max_par = track[track['likelihood'].values==max_lik]
+                uncertainty = cal_uncertainty(idx, expr[i], max_par.iloc[:,:-3],summary,candidates,regulator[i],candidates_sd)
                 add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
-                       'regulator':regulator[i],'equation':sym.latex(expr[i]['vmax']*expr[i]['occu']),'meas_flux':summary['flux'][idx].loc[:,bool_all],\
-                       'pred_flux':max_par.iloc[:,-2].values,'best_fit':max_par.iloc[:,:-3],'best_lik':max_lik,\
+                       'regulator':regulator[i],'equation':(expr[i]['vmax']*expr[i]['occu']),'meas_flux':summary['flux'][idx].loc[:,bool_all],\
+                       'pred_flux':max_par.iloc[:,-2].values,'uncertainty':uncertainty[0],'best_fit':max_par.iloc[:,:-3],'best_lik':max_lik,\
                        'lik_cond':max_par.iloc[:,-1].values[0]}
                 results = results.append([add])
     results = results.sort_values(by='best_lik')
     results.reset_index(drop=True,inplace=True)
     return results
 
+#%% Validate results
+# Run likelihood ratio test and Bayesian a posteriori probability given a gold standard of regulators.
+# Inputs:
+def validate(results, gold_std=None, fullreg=None):
+    noreg = results.loc[results['regulator']==''].reset_index(drop=True)
+    noreg['pvalue']= np.ones((noreg.shape[0],1))
+    validation = noreg[['rxn_id','regulator','best_lik','pvalue']]
+    ncond = list(map(lambda x: len(x[0]),list(noreg['lik_cond'].values)))
+    npar = list(map(lambda x: x.shape[1],list(noreg['best_fit'])))
+    validation.reset_index(drop=True,inplace=True)
+    for i,rxn in enumerate(list(noreg['rxn_id'].values)):
+        rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
+        if rxn_results.empty==0:
+            rxn_results['pvalue']= np.ones((rxn_results.shape[0],1))
+            for j,reg in enumerate(list(rxn_results['regulator'].values)):
+                ratio = 2**(rxn_results['best_lik'].iloc[j]-noreg['best_lik'].iloc[i])
+                p = chisqprob(ratio, len(reg))
+                rxn_results.loc[j,'pvalue']=p
+                ncond.append(len(rxn_results['lik_cond'].iloc[j][0]))
+                npar.append(rxn_results['best_fit'].iloc[j].shape[1])
+            validation = validation.append(rxn_results[['rxn_id','regulator','best_lik','pvalue']],ignore_index=True)
+    
+    if gold_std is not None:
+        reactions = gold_std.index.values
+        regs = fullreg.loc[reactions]
+        regs_unique = regs.drop_duplicates()
+        n_tested = np.zeros([regs_unique.shape[0],1])
+        n_ecoli = np.zeros([regs_unique.shape[0],1])
+        outcome = np.zeros([regs_unique.shape[0],])
+        for i,rxn in enumerate(list(regs_unique.index.values)):
+            n_tested[i,0] = np.log2(regs_unique.loc[rxn].shape[0])
+            n_ecoli[i,0] = np.sum(regs['metab'].loc[rxn]==regs_unique['metab'].iloc[i])
+            if any(regs_unique['metab'].iloc[i] in s for s in list(gold_std['metabolite'].loc[rxn])):
+                outcome[i] = 1
+        income = np.concatenate([n_tested,n_ecoli],1)
+        logreg = LogisticRegression()
+        logreg.fit(income,outcome)
+        
+        reactions = [s.lower() for s in list(noreg['rxn_id'].values)]
+        regs = fullreg.loc[reactions]
+        regs_unique = regs.reset_index().drop_duplicates().set_index('rxn_id')
+        validation2 = validation.loc[validation['regulator']!='']
+        n_tested = np.zeros([validation2.shape[0],1])
+        n_ecoli = np.zeros([validation2.shape[0],1])
+        for i,rxn in enumerate(list(validation2['rxn_id'].values)):
+            n_tested[i,0] = np.log2(regs_unique.loc[rxn.lower()].shape[0])
+            n_ecoli[i,0] = np.sum(regs['metab'].loc[rxn.lower()]==validation2['regulator'].iloc[i][0][4:-2])
+        test = np.concatenate([n_tested,n_ecoli],1)
+        prior_reg = logreg.predict_proba(test)
+        prior_all = np.concatenate([np.ones([noreg.shape[0],]),prior_reg[:,0]])
+        validation['posteriori'] = np.log2(prior_all*(2**validation['best_lik'].values))
+        
+    aic = np.zeros([validation.shape[0],1])
+    for i,rxn in enumerate(list(validation['rxn_id'].values)):
+        if gold_std is None:
+            aic[i,0] = 2*npar[i]-2*validation['best_lik'].iloc[i]
+        else:
+            aic[i,0] = 2*npar[i]-2*validation['posteriori'].iloc[i]
+            #aic[i,0] = 2*npar*(1+((npar+1)/(ncond-npar-1)))-2*np.log(prior_all[i])
+    validation['AIC'] = aic
+    validation['ncond'] = ncond
+    return validation
+
+
 #%% Show heatmap across conditions
 # Take results and plot them as a heatmap.
 # Inputs: results dataframe, reaction id.
-
 def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
     if rxn_id is not None:
         results = results.loc[results['rxn_id']==rxn_id]
@@ -608,7 +775,6 @@ def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
 #%% Plot predicted and measured fluxes
 # Plot predicted and measured fluxes across conditions.
 # Inputs: index or reaction id, results dataframe, summary dataframe, standard deviation of fluxes.
-    
 def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
     if isinstance(idx,int):
         react = results.iloc[[idx]]
@@ -656,7 +822,6 @@ def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
 #%% Plot improvement of likelihood in best condition
 # Plot likelihood improvement 
 # Inputs: results dataframe, reaction id.
-    
 def plot_likelihood(results, cond=None, save=False, save_dir=''):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
     if isinstance(cond,str):
@@ -718,4 +883,3 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
     if save:
         fig.savefig(save_dir+'improvement_'+str(cond)+'.pdf', bbox_inches='tight')
     plt.show()
-    
