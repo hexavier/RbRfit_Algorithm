@@ -22,8 +22,6 @@ from sklearn.linear_model import LogisticRegression
 # product or enzyme).
 def extract_info_df(molecules, dataset, sd, mol_type):
     mol_df, sd_df, names = ([] for l in range(3))
-    ncond = dataset.shape[1]
-    mol_bool = [True]*ncond
     if mol_type=='enzyme':
         mapping = pd.read_table("ECOLI_83333_idmapping.dat",header=None)
         for j in range(len(molecules)):
@@ -33,7 +31,6 @@ def extract_info_df(molecules, dataset, sd, mol_type):
                 mol_df.append(dataset.loc[gene[0]].values)
                 if (sd is not None): sd_df.append(sd.loc[gene[0]].values)
                 names.append(gene[0])
-                mol_bool = (mol_bool & (np.isnan(dataset.loc[gene[0]].values)==0))
     else:
         for j in range(len(molecules)):
             met = molecules[j].id[:-2] #strip compartment letter from id
@@ -43,13 +40,12 @@ def extract_info_df(molecules, dataset, sd, mol_type):
                     mol_df.append(dataset.loc[met].values)
                     if (sd is not None): sd_df.append(sd.loc[met].values)
                     names.append(molecules[j].id)
-                    mol_bool = (mol_bool & (np.isnan(dataset.loc[met].values)==0))
     mol_df = pd.DataFrame(mol_df,columns = dataset.columns, index = names)
     if sd_df:
         sd_df = pd.DataFrame(sd_df,columns = dataset.columns, index = names)
     else:
         sd_df = pd.DataFrame(np.zeros(mol_df.shape),columns = dataset.columns, index = names)
-    return mol_df,sd_df, mol_bool
+    return mol_df,sd_df
     
 #%% Determine binding site
 # For all metabolites involved in reaction, determine the binding site.
@@ -131,31 +127,28 @@ def get_binding_sites(rxn_id,model):
 # DataFrame containing prot x cond, and DataFrame with metabolites x cond.
 
 def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=None,binding_site=None):
-    reaction, reactant, reactant_sd, product, product_sd, enzyme, enzyme_sd, flux, bools, bs = ([] for l in range(10))
+    reaction, reactant, reactant_sd, product, product_sd, enzyme, enzyme_sd, flux, bs = ([] for l in range(9))
     
     for i in range(len(rxn_id)):
         # Reaction value
         reaction.append(model.reactions.get_by_id(rxn_id[i]).reaction)
         # Reactant values
         react = model.reactions.get_by_id(rxn_id[i]).reactants
-        react_df,react_sd, react_bool = extract_info_df(react,metab,metab_sd,'reactant')
+        react_df,react_sd = extract_info_df(react,metab,metab_sd,'reactant')
         # Product values
         prod = model.reactions.get_by_id(rxn_id[i]).products
-        prod_df,prod_sd, prod_bool = extract_info_df(prod,metab,metab_sd,'product')
+        prod_df,prod_sd = extract_info_df(prod,metab,metab_sd,'product')
         # Enzyme values
         enz = list(model.reactions.get_by_id(rxn_id[i]).genes)
-        enz_df,enz_sd, enz_bool = extract_info_df(enz,prot,prot_sd,'enzyme')
+        enz_df,enz_sd = extract_info_df(enz,prot,prot_sd,'enzyme')
         # Append all data
-        flux_bool = np.isnan(fluxes.loc[rxn_id[i]].values)==0
-        bool_all = (react_bool & prod_bool & enz_bool & flux_bool)
-        reactant.append(react_df.loc[:,bool_all])
-        reactant_sd.append(react_sd.loc[:,bool_all])
-        product.append(prod_df.loc[:,bool_all])
-        product_sd.append(prod_sd.loc[:,bool_all])
-        enzyme.append(enz_df.loc[:,bool_all])
-        enzyme_sd.append(enz_sd.loc[:,bool_all])
-        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]).loc[:,bool_all])
-        bools.append(bool_all)
+        reactant.append(react_df)
+        reactant_sd.append(react_sd)
+        product.append(prod_df)
+        product_sd.append(prod_sd)
+        enzyme.append(enz_df)
+        enzyme_sd.append(enz_sd)
+        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]))
         if binding_site is None:
             bs.append([list(react_df.index.values)+list(prod_df.index.values)])
     
@@ -167,7 +160,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=
                             'product_sd':product_sd,'enzyme':enzyme,'enzyme_sd':enzyme_sd,\
                             'flux':flux,'binding_site':binding_site})
     summary = summary.set_index('idx')
-    return summary,bools
+    return summary
 
 #%% Define candidates
 # For each reaction, a table with the regulators is created. 
@@ -175,7 +168,7 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=
 # for all rxn_id in E. coli, DataFrame with metabolites x cond, and DataFrame with
 # regulators for all rxn_id in other organisms (optional).
     
-def define_candidates(rxn_id,reg_coli,metab,bools,metab_sd=None,reg_other=None):
+def define_candidates(rxn_id,reg_coli,metab,metab_sd=None,reg_other=None):
     act_coli,act_coli_sd, inh_coli,inh_coli_sd, act_other,act_other_sd, inh_other,inh_other_sd = ([] for l in range(8))
     for i in range(len(rxn_id)):
         if (any(rxn_id[i].lower() in s for s in [reg_coli.index.values])):
@@ -204,14 +197,14 @@ def define_candidates(rxn_id,reg_coli,metab,bools,metab_sd=None,reg_other=None):
                 act_coli.append('No data available for the candidate activators.')
                 act_coli_sd.append('No data available for the candidate activators.')
             else:
-                act_coli_df.drop_duplicates(inplace=True); act_coli.append(act_coli_df.loc[:,bools[i]])
-                act_coli_sd_df.drop_duplicates(inplace=True); act_coli_sd.append(act_coli_sd_df.loc[:,bools[i]])
+                act_coli_df = act_coli_df.reset_index().drop_duplicates().set_index('index'); act_coli.append(act_coli_df)
+                act_coli_sd_df = act_coli_sd_df.reset_index().drop_duplicates().set_index('index'); act_coli_sd.append(act_coli_sd_df)
             if inh_coli_df.empty:
                 inh_coli.append('No data available for the candidate activators.')
                 inh_coli_sd.append('No data available for the candidate activators.')
             else:
-                inh_coli_df.drop_duplicates(inplace=True); inh_coli.append(inh_coli_df.loc[:,bools[i]])
-                inh_coli_sd_df.drop_duplicates(inplace=True); inh_coli_sd.append(inh_coli_sd_df.loc[:,bools[i]])
+                inh_coli_df = inh_coli_df.reset_index().drop_duplicates().set_index('index'); inh_coli.append(inh_coli_df)
+                inh_coli_sd_df = inh_coli_sd_df.reset_index().drop_duplicates().set_index('index'); inh_coli_sd.append(inh_coli_sd_df)
         else:
             act_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
             act_coli_sd.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
@@ -519,11 +512,13 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
                 vbles_vals.append(candidates.loc[reg[:-2],cond].values)
                 
     f = sym.lambdify(vbles, occu)
-    bool_all =(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    flux = summary['flux'][idx].values
+    bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    bool_enz = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))
+    bool_all = ((np.isnan(flux)==0).reshape(ncond,)&(bool_occu)&(bool_enz))
     vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
     ncond = np.sum(bool_all)
     pred_occu = f(*vbles_vals)
-    flux = summary['flux'][idx].values
     if len(summary['flux'][idx]) == 1: # fluxes as point estimates
         kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), flux[:,bool_all].reshape(ncond))
         pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
@@ -636,7 +631,9 @@ def cal_uncertainty(idx, expr, parameters, summary, candidates=None, regulator=N
                 vbles_vals.append(candidates.loc[reg[:-2],cond].values)
                 sd_vals.append(candidates_sd.loc[reg[:-2],cond].values)
     
-    bool_all =(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    flux = summary['flux'][idx].values
+    bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+    bool_all = ((np.isnan(flux)==0).reshape(ncond,)&(bool_occu))
     vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
     ncond = np.sum(bool_all)
     grads = np.zeros((ncond,len(species)))
