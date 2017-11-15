@@ -142,13 +142,13 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=
         enz = list(model.reactions.get_by_id(rxn_id[i]).genes)
         enz_df,enz_sd = extract_info_df(enz,prot,prot_sd,'enzyme')
         # Append all data
-        reactant.append(react_df)
-        reactant_sd.append(react_sd)
-        product.append(prod_df)
-        product_sd.append(prod_sd)
-        enzyme.append(enz_df)
-        enzyme_sd.append(enz_sd)
-        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values],columns = fluxes.columns, index = [rxn_id[i]]))
+        reactant.append(react_df.copy())
+        reactant_sd.append(react_sd.copy())
+        product.append(prod_df.copy())
+        product_sd.append(prod_sd.copy())
+        enzyme.append(enz_df.copy())
+        enzyme_sd.append(enz_sd.copy())
+        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values].copy(),columns = fluxes.columns, index = [rxn_id[i]]))
         if binding_site is None:
             bs.append([list(react_df.index.values)+list(prod_df.index.values)])
     
@@ -197,14 +197,14 @@ def define_candidates(rxn_id,reg_coli,metab,metab_sd=None,reg_other=None):
                 act_coli.append('No data available for the candidate activators.')
                 act_coli_sd.append('No data available for the candidate activators.')
             else:
-                act_coli_df = act_coli_df.reset_index().drop_duplicates().set_index('index'); act_coli.append(act_coli_df)
-                act_coli_sd_df = act_coli_sd_df.reset_index().drop_duplicates().set_index('index'); act_coli_sd.append(act_coli_sd_df)
+                act_coli_df = act_coli_df.reset_index().drop_duplicates().set_index('index'); act_coli.append(act_coli_df.copy())
+                act_coli_sd_df = act_coli_sd_df.reset_index().drop_duplicates().set_index('index'); act_coli_sd.append(act_coli_sd_df.copy())
             if inh_coli_df.empty:
                 inh_coli.append('No data available for the candidate activators.')
                 inh_coli_sd.append('No data available for the candidate activators.')
             else:
-                inh_coli_df = inh_coli_df.reset_index().drop_duplicates().set_index('index'); inh_coli.append(inh_coli_df)
-                inh_coli_sd_df = inh_coli_sd_df.reset_index().drop_duplicates().set_index('index'); inh_coli_sd.append(inh_coli_sd_df)
+                inh_coli_df = inh_coli_df.reset_index().drop_duplicates().set_index('index'); inh_coli.append(inh_coli_df.copy())
+                inh_coli_sd_df = inh_coli_sd_df.reset_index().drop_duplicates().set_index('index'); inh_coli_sd.append(inh_coli_sd_df.copy())
         else:
             act_coli.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
             act_coli_sd.append('No candidate regulators for %s in E.coli.' % rxn_id[i])
@@ -370,13 +370,27 @@ def write_rate_equations(idx,summary, model, candidates=None, nreg=1, coop=False
     
     return expr,parframe,regulator
 
+#%% Fill NaN values
+# Sample NaN from existing values and add them to parameter table.
+# Inputs: add dataframe, summary dataframe, reaction index, type of molecule.
+
+def fill_nan(add,idx,summary,molecule):
+    for i,mol in enumerate(summary[molecule][idx].index):
+        isnan = np.isnan(summary[molecule][idx].loc[mol])
+        if any(isnan):
+            for j,cond in enumerate(summary[molecule][idx].columns[isnan]):
+                par1 = np.nanmedian(summary[molecule][idx].loc[mol])
+                par2 = np.nanstd(summary[molecule][idx].loc[mol])
+                add = add.append({'parameters':'c_'+mol,'species':cond,'speciestype':molecule,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+    return add
 #%% Build parameter priors
 # For each of the parameters, define the prior/proposal distribution needed for MCMC.
 # Inputs: dataframe with parameters, summary generated in define_reactions, the 
 # stoichiometric model, and candidate dataframe.            
-def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
+def build_priors(param, idx, summary, model, priorKeq=False, candidates=None, sampleNaN=True):
     reaction = model.reactions.get_by_id(summary['rxn_id'][idx])
-    distribution, par1, par2 = ([] for i in range(3))
+    distribution, par1, par2,cand,candtype = ([] for i in range(5))
+    ispar = np.array([True]*param.shape[0])
     for i,par in enumerate(param['parameters']):
         if param['speciestype'][i] == 'met':
             distribution.append('unif')
@@ -393,22 +407,27 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
                     (any(param['species'][i] in s for s in [candidates['act_coli'][idx].index.values])):
                         par1.append(-15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
                         par2.append(15.0+np.log2(np.nanmedian(candidates['act_coli'][idx].loc[param['species'][i]].values)))
+                        cand.append(param['species'][i]); candtype.append('act_coli')
                     elif (isinstance(candidates['inh_coli'][idx],pd.DataFrame)) and \
                     (any(param['species'][i] in s for s in [candidates['inh_coli'][idx].index.values])):
                         par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
                         par2.append(15.0+np.log2(np.nanmedian(candidates['inh_coli'][idx].loc[param['species'][i]].values)))
+                        cand.append(param['species'][i]); candtype.append('inh_coli')
                     elif (isinstance(candidates['act_other'][idx],pd.DataFrame)) and \
                     (any(param['species'][i] in s for s in [candidates['act_other'][idx].index.values])):
                         par1.append(-15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
                         par2.append(15.0+np.log2(np.nanmedian(candidates['act_other'][idx].loc[param['species'][i]].values)))
+                        cand.append(param['species'][i]); candtype.append('act_other')
                     elif (isinstance(candidates['inh_other'][idx],pd.DataFrame)) and \
                     (any(param['species'][i] in s for s in [candidates['inh_other'][idx].index.values])):
                         par1.append(-15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
                         par2.append(15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
+                        cand.append(param['species'][i]); candtype.append('inh_other')
                 else:
                     cond = summary['flux'][idx].columns.values
                     par1.append(-15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
                     par2.append(15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
+                    cand.append(param['species'][i])
         elif param['speciestype'][i] == 'K_eq':
             Q_r = 1
             for subs in list(summary['reactant'][idx].index):
@@ -437,13 +456,40 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None):
     param['distribution'] = pd.Series(distribution, index=param.index)
     param['par1'] = pd.Series(par1, index=param.index)
     param['par2'] = pd.Series(par2, index=param.index)
+    param['ispar'] = pd.Series(ispar, index=param.index)
+    
+    if sampleNaN:
+        add = pd.DataFrame(columns=param.columns)
+        add = fill_nan(add,idx,summary,'reactant')
+        add = fill_nan(add,idx,summary,'product')
+        add = fill_nan(add,idx,summary,'enzyme')
+        add = fill_nan(add,idx,summary,'flux')
+        if (candidates is not None):
+            if list(candidates.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+                       'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
+                for i,ca in enumerate(cand):
+                    isnan = np.isnan(candidates[candtype[i]][idx].loc[ca])
+                    if any(isnan):
+                        for j,cond in enumerate(candidates[candtype[i]][idx].columns[isnan]):
+                            par1 = np.nanmedian(candidates[candtype[i]][idx].loc[ca])
+                            par2 = np.nanstd(candidates[candtype[i]][idx].loc[ca])
+                            add = add.append({'parameters':'c_'+ca,'species':cond,'speciestype':candtype[i],'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+            else:
+                for i,ca in enumerate(cand):
+                    isnan = np.isnan(candidates.loc[ca[:-2]])
+                    if any(isnan):
+                        for j,cond in enumerate(candidates.columns[isnan]):
+                            par1 = np.nanmedian(candidates.loc[ca[:-2]])
+                            par2 = np.nanstd(candidates.loc[ca[:-2]])
+                            add = add.append({'parameters':'c_'+ca,'species':cond,'speciestype':None,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+        param = param.append(add,ignore_index=True)
     return param
 
 #%% Draw parameters
 # From the prior distribution, update those parameters that are present in ‘updates’.
 # Inputs: parameter indeces to update within a list, parameter dataframe with priors, current values.
 def draw_par(update, parameters, current):
-    draw = current
+    draw = list(current)
     for par in update:
         if parameters['distribution'][par]=='unif':
             draw[par] = 2**uniform(parameters['par1'][par],parameters['par2'][par])
@@ -472,7 +518,6 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
     occu = equations['occu']
     enz = summary['enzyme'][idx].values
     ncond = enz.shape[1]
-    current = np.array(current)
     vbles = []
     vbles_vals = []
     for par in list(parameters['parameters'].values):
@@ -540,19 +585,42 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
         else:
             return None,None,None,None,None # Quit the evaluation of this expression
 
+#%% Reconstruct summary and candidates
+# Add sampled values for NaN into summary and candidates.
+# Inputs: current par, summary, candidates.
+def add_sampled(idx, current, parameters, summary, candidates=None):
+    sampled = parameters.loc[parameters['ispar']==False]
+    current = np.array(current); current = current[parameters['ispar']==False]
+    for i, spe in enumerate(sampled['parameters']):
+        if sampled['speciestype'].iloc[i] is None:
+            candidates.loc[spe[2:-2],sampled['species'].iloc[i]] = current[i]
+        elif any([sampled['speciestype'].iloc[i] in s for s in ['reactant','product','enzyme','flux']]):
+            mol_df = summary[sampled['speciestype'].iloc[i]][idx].copy()
+            mol_df.loc[spe[2:],sampled['species'].iloc[i]] = current[i]
+            summary[sampled['speciestype'].iloc[i]][idx] = mol_df
+        else:
+            mol_df = candidates[sampled['speciestype'].iloc[i]][idx].copy()
+            mol_df.loc[spe[2:],sampled['species'].iloc[i]] = current[i]
+            candidates[sampled['speciestype'].iloc[i]][idx] = mol_df
+    return summary,candidates
+
 #%% Fit reaction equation using MCMC-NNLS
 # Sample posterior distribution Pr(Ω|M,E,jF) using MCMC-NNLS.
 # Inputs: markov parameters (fraction of samples that are reported, how many samples are 
 # desired, how many initial samples are skipped), parameters table with priors, 
 # summary as generated in define_reactions, equations, and candidates.
-def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates=None,regulator=None):
+def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates=None,regulator=None,sampleNaN=True):
     print('Running MCMC-NNLS for reaction %d... Candidate regulator: %s' % (idx,regulator))
     colnames = list(parameters['parameters'].values)
     colnames.extend(re.findall('K_cat_[a-zA-Z0-9_]+', str(equations['vmax']))+['likelihood','pred_flux','lik_cond'])
     track = pd.DataFrame(columns=colnames)
     current_pars = [None] * len(parameters)
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
-    current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters, current_pars, summary, equations,candidates,regulator)
+    summary_cp=summary.copy(); candidates_cp=candidates.copy()
+    if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
+        summary_cp,candidates_cp = add_sampled(idx, current_pars, parameters, summary_cp, candidates_cp)
+    current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
+                                np.array(current_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
     if current_lik is None:
         print('Number of parameters outpaces the number of conditions.')
         return None,None # Quit the evaliation of this expression
@@ -560,7 +628,10 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
         for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
             for p in range(len(parameters)):
                 proposed_pars = draw_par([p], parameters, current_pars)
-                proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond,bool_all = calculate_lik(idx, parameters, proposed_pars, summary, equations,candidates,regulator)
+                if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
+                    summary_cp,candidates_cp = add_sampled(idx, proposed_pars, parameters, summary_cp, candidates_cp)
+                proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
+                                    np.array(proposed_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
                 if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
                     (proposed_lik > current_lik) or ((proposed_lik==current_lik)and(proposed_lik==-np.inf))):
                     current_pars = proposed_pars
@@ -568,6 +639,8 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
                     cur_pred_flux = pro_pred_flux
                     current_lik = proposed_lik
                     cur_lik_cond = pro_lik_cond
+#                    summary = pro_summary
+#                    candidates = pro_candidates
             if (i > markov_par['burn_in']):
                 if ((i-markov_par['burn_in'])%markov_par['freq'])==0:
                     add_pars = list(current_pars)
@@ -655,20 +728,21 @@ def cal_uncertainty(idx, expr, parameters, summary, candidates=None, regulator=N
 #%% Fit reaction equations
 # Run all required functions as a block to fit predicted to measured flux.
 # Inputs: summary dataframe, stoichiometric model, markov parameters, and candidates dataframe (optional).
-def fit_reactions(summary,model,markov_par,candidates=None,priorKeq=False,candidates_sd=None,maxreg=1,coop=False):
+def fit_reactions(summary,model,markov_par,candidates=None,candidates_sd=None,priorKeq=False,maxreg=1,coop=False,sampleNaN=True):
     results = pd.DataFrame(columns=['idx','reaction','rxn_id','regulator','equation',\
                                     'meas_flux','pred_flux','best_fit','best_lik','lik_cond'])
     for idx in list(summary.index):
         expr,parameters,regulator = write_rate_equations(idx,summary,model,candidates,maxreg,coop)
         for i in range(len(expr)):
-            parameters[i] = build_priors(parameters[i],idx,summary,model,priorKeq,candidates)
-            track,bool_all = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i])
+            parameters[i] = build_priors(parameters[i],idx,summary,model,priorKeq,candidates,sampleNaN)
+            track,bool_all = fit_reaction_MCMC(idx,markov_par,parameters[i],summary,expr[i],candidates,regulator[i],sampleNaN)
             if track is None:
                 continue # Quit the evaliation of this expression
             else:
                 max_lik = max(track['likelihood'].values)
                 max_par = track[track['likelihood'].values==max_lik]
-                uncertainty = cal_uncertainty(idx, expr[i], max_par.iloc[:,:-3],summary,candidates,regulator[i],candidates_sd)
+                par_bool = ['K_' in s for s in max_par.columns]
+                uncertainty = cal_uncertainty(idx, expr[i], max_par.loc[:,par_bool],summary,candidates,regulator[i],candidates_sd)
                 add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
                        'regulator':regulator[i],'equation':(expr[i]['vmax']*expr[i]['occu']),'meas_flux':summary['flux'][idx].loc[:,bool_all],\
                        'pred_flux':max_par.iloc[:,-2].values,'uncertainty':uncertainty[0],'best_fit':max_par.iloc[:,:-3],'best_lik':max_lik,\
