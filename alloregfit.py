@@ -381,7 +381,7 @@ def fill_nan(add,idx,summary,molecule):
             for j,cond in enumerate(summary[molecule][idx].columns[isnan]):
                 par1 = np.nanmedian(summary[molecule][idx].loc[mol])
                 par2 = np.nanstd(summary[molecule][idx].loc[mol])
-                add = add.append({'parameters':'c_'+mol,'species':cond,'speciestype':molecule,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+                add = add.append({'parameters':str('c_%s,%s,%s'%(mol,cond,molecule)),'species':cond,'speciestype':molecule,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
     return add
 #%% Build parameter priors
 # For each of the parameters, define the prior/proposal distribution needed for MCMC.
@@ -473,7 +473,7 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None, sa
                         for j,cond in enumerate(candidates[candtype[i]][idx].columns[isnan]):
                             par1 = np.nanmedian(candidates[candtype[i]][idx].loc[ca])
                             par2 = np.nanstd(candidates[candtype[i]][idx].loc[ca])
-                            add = add.append({'parameters':'c_'+ca,'species':cond,'speciestype':candtype[i],'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+                            add = add.append({'parameters':str('c_%s,%s,%s'%(ca,cond,candtype[i])),'species':cond,'speciestype':candtype[i],'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
             else:
                 for i,ca in enumerate(cand):
                     isnan = np.isnan(candidates.loc[ca[:-2]])
@@ -481,7 +481,7 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None, sa
                         for j,cond in enumerate(candidates.columns[isnan]):
                             par1 = np.nanmedian(candidates.loc[ca[:-2]])
                             par2 = np.nanstd(candidates.loc[ca[:-2]])
-                            add = add.append({'parameters':'c_'+ca,'species':cond,'speciestype':None,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
+                            add = add.append({'parameters':str('c_%s,%s'%(ca,cond)),'species':cond,'speciestype':None,'distribution':'norm','par1':par1,'par2':par2,'ispar':False},ignore_index=True)
         param = param.append(add,ignore_index=True)
     return param
 
@@ -587,21 +587,22 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
 
 #%% Reconstruct summary and candidates
 # Add sampled values for NaN into summary and candidates.
-# Inputs: current par, summary, candidates.
+# Inputs: current par, array with parameter names, summary, candidates.
 def add_sampled(idx, current, parameters, summary, candidates=None):
-    sampled = parameters.loc[parameters['ispar']==False]
-    current = np.array(current); current = current[parameters['ispar']==False]
-    for i, spe in enumerate(sampled['parameters']):
-        if sampled['speciestype'].iloc[i] is None:
-            candidates.loc[spe[2:-2],sampled['species'].iloc[i]] = current[i]
-        elif any([sampled['speciestype'].iloc[i] in s for s in ['reactant','product','enzyme','flux']]):
-            mol_df = summary[sampled['speciestype'].iloc[i]][idx].copy()
-            mol_df.loc[spe[2:],sampled['species'].iloc[i]] = current[i]
-            summary[sampled['speciestype'].iloc[i]][idx] = mol_df
-        else:
-            mol_df = candidates[sampled['speciestype'].iloc[i]][idx].copy()
-            mol_df.loc[spe[2:],sampled['species'].iloc[i]] = current[i]
-            candidates[sampled['speciestype'].iloc[i]][idx] = mol_df
+    met_bool = np.array([',' in s for s in parameters])
+    current = np.array(current); current = current[met_bool]
+    for i, spe in enumerate(parameters[met_bool]):
+        specie = re.split(',', spe)
+        if len(specie)==2:
+            candidates.loc[specie[0][2:-2],specie[1]] = current[i]
+        elif any([specie[2] in s for s in ['reactant','product','enzyme','flux']]):
+            mol_df = summary[specie[2]][idx].copy()
+            mol_df.loc[specie[0][2:],specie[1]] = current[i]
+            summary[specie[2]][idx] = mol_df
+        elif any([specie[2] in s for s in ['act_coli', 'act_other','inh_coli', 'inh_other']]):
+            mol_df = candidates[specie[2]][idx].copy()
+            mol_df.loc[specie[0][2:],specie[1]] = current[i]
+            candidates[specie[2]][idx] = mol_df
     return summary,candidates
 
 #%% Fit reaction equation using MCMC-NNLS
@@ -618,7 +619,7 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
     current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
     summary_cp=summary.copy(); candidates_cp=candidates.copy()
     if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
-        summary_cp,candidates_cp = add_sampled(idx, current_pars, parameters, summary_cp, candidates_cp)
+        summary_cp,candidates_cp = add_sampled(idx, current_pars, parameters['parameters'].values, summary_cp, candidates_cp)
     current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
                                 np.array(current_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
     if current_lik is None:
@@ -629,7 +630,7 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
             for p in range(len(parameters)):
                 proposed_pars = draw_par([p], parameters, current_pars)
                 if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
-                    summary_cp,candidates_cp = add_sampled(idx, proposed_pars, parameters, summary_cp, candidates_cp)
+                    summary_cp,candidates_cp = add_sampled(idx, proposed_pars, parameters['parameters'].values, summary_cp, candidates_cp)
                 proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
                                     np.array(proposed_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
                 if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
@@ -754,7 +755,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,candidates_sd=None,pr
 
 #%% Validate results
 # Run likelihood ratio test and Bayesian a posteriori probability given a gold standard of regulators.
-# Inputs:
+# Inputs: results dataframe.
 def validate(results, gold_std=None, fullreg=None):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
     noreg['pvalue']= np.ones((noreg.shape[0],1))
@@ -815,6 +816,99 @@ def validate(results, gold_std=None, fullreg=None):
     validation['ncond'] = ncond
     return validation
 
+#%% Validate results by condition
+# Run likelihood ratio test in a condition-specific manner and weight regulation scores according to this.
+# Inputs:
+def validate_bycond(results,summary=None,candidates=None):
+    noreg = results.loc[results['regulator']==''].reset_index(drop=True)
+    ncond = list(map(lambda x: len(x[0]),list(noreg['lik_cond'].values)))
+    npar = list(map(lambda x: x.shape[1],list(noreg['best_fit'])))
+    noreg['pvalue']= list(map(lambda i: np.ones((1,ncond[i])),np.arange(noreg.shape[0])))
+    noreg['elasticity']= list(map(lambda i: np.zeros((1,ncond[i])),np.arange(noreg.shape[0])))
+    validation = noreg[['rxn_id','regulator','lik_cond','pvalue','elasticity']]
+    validation.reset_index(drop=True,inplace=True)
+    for i,rxn in enumerate(list(noreg['rxn_id'].values)):
+        rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
+        if rxn_results.empty==0:
+            pval = []; elas = []
+            idx = int(summary.loc[summary['rxn_id']==rxn].index.values)
+            for j,reg in enumerate(list(rxn_results['regulator'].values)):
+                bool_cond = np.array(list(map(lambda x: any(x in s for s in list(rxn_results.loc[j,'meas_flux'].columns)),list(noreg.loc[i,'meas_flux'].columns))))
+                cond = list(rxn_results.loc[j,'meas_flux'].columns)
+                ratio = 2**(rxn_results['lik_cond'].iloc[j][0]-noreg['lik_cond'].iloc[i][0][bool_cond])
+                p = chisqprob(ratio, len(reg))
+                pval.append(p[0])
+                ncond.append(len(rxn_results['lik_cond'].iloc[j][0]))
+                par_bool = ['K_' in s for s in rxn_results['best_fit'].iloc[j].columns]
+                npar.append(rxn_results['best_fit'].iloc[j].loc[:,par_bool].shape[1])
+                if (summary is not None) and (candidates is not None):
+                    summary_cp=summary.copy(); candidates_cp=candidates.copy()
+                    parameters = rxn_results['best_fit'].iloc[j].loc[:,par_bool].columns
+                    if any([',' in s for s in parameters]):
+                        summary_cp,candidates_cp = add_sampled(idx,list(rxn_results['best_fit'].iloc[j].iloc[0,:]), parameters, summary_cp, candidates_cp)
+                    vbles,vbles_vals = ([] for l in range(2))
+                    for par in range(npar[-1]):
+                        vbles.append(rxn_results['best_fit'].iloc[j].loc[:,par_bool].columns[par])
+                        rep_par = np.repeat(rxn_results['best_fit'].iloc[j].iloc[0,par],ncond[-1])
+                        vbles_vals.append(rep_par)
+                    for sub in list(summary_cp.loc[idx,'reactant'].index):
+                        vbles.append('c_'+sub)
+                        vbles_vals.append(summary_cp.loc[idx,'reactant'].loc[sub,cond].values)
+                    for prod in list(summary_cp.loc[idx,'product'].index):
+                        vbles.append('c_'+prod)
+                        vbles_vals.append(summary_cp.loc[idx,'product'].loc[prod,cond].values)
+                    for enz in list(summary_cp.loc[idx,'enzyme'].index):
+                        vbles.append('c_'+enz)
+                        vbles_vals.append(summary_cp.loc[idx,'enzyme'].loc[enz,cond].values)
+                    for rg in reg:
+                        rg = rg[4:]
+                        if list(candidates_cp.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
+                                   'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
+                            if (isinstance(candidates_cp.loc[idx,'act_coli'],pd.DataFrame)) and \
+                            (any(rg in s for s in [candidates_cp.loc[idx,'act_coli'].index.values])) and not (any('c_'+rg in s for s in vbles)):
+                                vbles.append('c_'+rg)
+                                vbles_vals.append(candidates_cp.loc[idx,'act_coli'].loc[rg,cond].values)
+                            elif (isinstance(candidates_cp.loc[idx,'inh_coli'],pd.DataFrame)) and \
+                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_coli'].index.values])) and not (any('c_'+rg in s for s in vbles)):
+                                vbles.append('c_'+rg)
+                                vbles_vals.append(candidates_cp.loc[idx,'inh_coli'].loc[rg,cond].values)
+                            elif (isinstance(candidates_cp.loc[idx,'act_other'],pd.DataFrame)) and \
+                            (any(rg in s for s in [candidates_cp.loc[idx,'act_other'].index.values])) and not (any('c_'+rg in s for s in vbles)):
+                                vbles.append('c_'+rg)
+                                vbles_vals.append(candidates_cp.loc[idx,'act_other'].loc[rg,cond].values)
+                            elif (isinstance(candidates_cp.loc[idx,'inh_other'],pd.DataFrame)) and \
+                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_other'].index.values])) and not (any('c_'+rg in s for s in vbles)):
+                                vbles.append('c_'+rg)
+                                vbles_vals.append(candidates_cp.loc[idx,'inh_other'].loc[rg,cond].values)
+                        elif not (any('c_'+rg in s for s in vbles)):
+                            vbles.append('c_'+rg)
+                            vbles_vals.append(candidates_cp.loc[rg[:-2],cond].values)
+                    flux = summary_cp.loc[idx,'flux'].loc[:,cond].values[0]
+                    bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
+                    bool_all = ((np.isnan(flux)==0).reshape(ncond[-1],)&(bool_occu))
+                    vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
+                    expr = rxn_results['equation'].iloc[j]
+                    f = sym.lambdify(vbles, expr)
+                    f_res = f(*vbles_vals)
+                    el = []
+                    for rg in reg:
+                        gradient = sym.diff(expr,'c_'+rg[4:])
+                        g = sym.lambdify(vbles, gradient)
+                        g_res = g(*vbles_vals)
+                        el.append(g_res*candidates_cp.loc[rg[4:-2],bool_all].values/f_res)
+                    elas.append(el)
+                else:
+                    elas.append(np.zeros((1,ncond[-1])))
+            rxn_results['pvalue']=pval
+            rxn_results['elasticity']=elas
+            validation = validation.append(rxn_results[['rxn_id','regulator','lik_cond','pvalue','elasticity']],ignore_index=True)
+            
+    aic = []
+    for i,rxn in enumerate(list(validation['rxn_id'].values)):
+        aic.append(2*npar[i]-2*validation['lik_cond'].iloc[i])
+    validation['AIC'] = aic
+    validation['ncond'] = ncond
+    return validation
 
 #%% Show heatmap across conditions
 # Take results and plot them as a heatmap.
@@ -852,6 +946,8 @@ def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
         width = 0.4
     elif isinstance(idx,str):
         react = results.loc[results['rxn_id']==idx][::-1]
+        if len(react)>25:
+            react = react.iloc[0:25,:]
         width = 0.8/(len(react)+1)
     meas_flux = react['meas_flux']
     pred_flux = react['pred_flux'].values
