@@ -6,7 +6,7 @@ import sympy as sym
 import numpy as np
 from obonet import read_obo
 from numpy.random import uniform,normal
-from scipy.stats import norm,chisqprob
+from scipy.stats import norm,chi2
 from scipy.optimize import nnls
 from scipy.integrate import quad
 from math import pi,e
@@ -769,7 +769,7 @@ def validate(results, gold_std=None, fullreg=None):
             rxn_results['pvalue']= np.ones((rxn_results.shape[0],1))
             for j,reg in enumerate(list(rxn_results['regulator'].values)):
                 ratio = 2**(rxn_results['best_lik'].iloc[j]-noreg['best_lik'].iloc[i])
-                p = chisqprob(ratio, len(reg))
+                p = chi2.sf(ratio, len(reg))
                 rxn_results.loc[j,'pvalue']=p
                 ncond.append(len(rxn_results['lik_cond'].iloc[j][0]))
                 npar.append(rxn_results['best_fit'].iloc[j].shape[1])
@@ -823,22 +823,28 @@ def validate_bycond(results,summary=None,candidates=None):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
     ncond = list(map(lambda x: len(x[0]),list(noreg['lik_cond'].values)))
     npar = list(map(lambda x: x.shape[1],list(noreg['best_fit'])))
-    noreg['pvalue']= list(map(lambda i: np.ones((1,ncond[i])),np.arange(noreg.shape[0])))
-    noreg['elasticity']= list(map(lambda i: np.zeros((1,ncond[i])),np.arange(noreg.shape[0])))
-    validation = noreg[['rxn_id','regulator','lik_cond','pvalue','elasticity']]
+    noreg['pvalue'] = list(map(lambda i: np.ones((1,ncond[i]))[0],np.arange(noreg.shape[0])))
+    noreg['elasticity'] = list(map(lambda i: np.zeros((1,ncond[i]))[0],np.arange(noreg.shape[0])))
+    noreg['pvalue_weighted'] = np.ones((noreg.shape[0],1))
+    noreg['elasticity_weighted'] = np.zeros((noreg.shape[0],1))
+    noreg['lik_weighted'] = noreg['best_lik'].copy()
+    validation = noreg[['rxn_id','regulator','lik_cond','lik_weighted','pvalue','pvalue_weighted','elasticity','elasticity_weighted']]
     validation.reset_index(drop=True,inplace=True)
     for i,rxn in enumerate(list(noreg['rxn_id'].values)):
         rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
         if rxn_results.empty==0:
-            pval = []; elas = []
+            pval, pval_weight, elas, elas_weight, lik_weight = ([] for i in range(5))
             idx = int(summary.loc[summary['rxn_id']==rxn].index.values)
             for j,reg in enumerate(list(rxn_results['regulator'].values)):
                 bool_cond = np.array(list(map(lambda x: any(x in s for s in list(rxn_results.loc[j,'meas_flux'].columns)),list(noreg.loc[i,'meas_flux'].columns))))
                 cond = list(rxn_results.loc[j,'meas_flux'].columns)
                 ratio = 2**(rxn_results['lik_cond'].iloc[j][0]-noreg['lik_cond'].iloc[i][0][bool_cond])
-                p = chisqprob(ratio, len(reg))
-                pval.append(p[0])
-                ncond.append(len(rxn_results['lik_cond'].iloc[j][0]))
+                p = chi2.sf(ratio, len(reg))
+                pval.append(p)
+                weights = (np.log(p)/np.sum(np.log(p)))
+                pval_weight.append(np.sum(p*weights))
+                lik_weight.append(np.sum(rxn_results['lik_cond'].iloc[j][0]*weights)*len(cond))
+                ncond.append(len(cond))
                 par_bool = ['K_' in s for s in rxn_results['best_fit'].iloc[j].columns]
                 npar.append(rxn_results['best_fit'].iloc[j].loc[:,par_bool].shape[1])
                 if (summary is not None) and (candidates is not None):
@@ -883,10 +889,7 @@ def validate_bycond(results,summary=None,candidates=None):
                         elif not (any('c_'+rg in s for s in vbles)):
                             vbles.append('c_'+rg)
                             vbles_vals.append(candidates_cp.loc[rg[:-2],cond].values)
-                    flux = summary_cp.loc[idx,'flux'].loc[:,cond].values[0]
-                    bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
-                    bool_all = ((np.isnan(flux)==0).reshape(ncond[-1],)&(bool_occu))
-                    vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
+
                     expr = rxn_results['equation'].iloc[j]
                     f = sym.lambdify(vbles, expr)
                     f_res = f(*vbles_vals)
@@ -895,18 +898,29 @@ def validate_bycond(results,summary=None,candidates=None):
                         gradient = sym.diff(expr,'c_'+rg[4:])
                         g = sym.lambdify(vbles, gradient)
                         g_res = g(*vbles_vals)
-                        el.append(g_res*candidates_cp.loc[rg[4:-2],bool_all].values/f_res)
+                        el.append(g_res*candidates_cp.loc[rg[4:-2],cond].values/f_res)
                     elas.append(el)
+                    elas_weight.append(np.sum(el*weights))
                 else:
                     elas.append(np.zeros((1,ncond[-1])))
+                    elas_weight.append(0)
+            rxn_results['lik_weighted']=lik_weight
             rxn_results['pvalue']=pval
+            rxn_results['pvalue_weighted']=pval_weight
             rxn_results['elasticity']=elas
-            validation = validation.append(rxn_results[['rxn_id','regulator','lik_cond','pvalue','elasticity']],ignore_index=True)
+            rxn_results['elasticity_weighted']=elas_weight
+            validation = validation.append(rxn_results[['rxn_id','regulator','lik_cond','lik_weighted','pvalue','pvalue_weighted','elasticity','elasticity_weighted']],ignore_index=True)
             
-    aic = []
+    aic = []; aic_weight = []
     for i,rxn in enumerate(list(validation['rxn_id'].values)):
         aic.append(2*npar[i]-2*validation['lik_cond'].iloc[i])
+        if validation['pvalue'].iloc[i][0] != 1.0:
+            weights = (np.log(validation['pvalue'].iloc[i])/np.sum(np.log(validation['pvalue'].iloc[i])))
+        else:
+            weights = np.ones((1,len(validation['pvalue'].iloc[i])))/len(validation['pvalue'].iloc[i])
+        aic_weight.append(np.sum(aic[-1][0]*weights))
     validation['AIC'] = aic
+    validation['AIC_weighted'] = aic_weight
     validation['ncond'] = ncond
     return validation
 
@@ -940,7 +954,7 @@ def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
 #%% Plot predicted and measured fluxes
 # Plot predicted and measured fluxes across conditions.
 # Inputs: index or reaction id, results dataframe, summary dataframe, standard deviation of fluxes.
-def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
+def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
     if isinstance(idx,int):
         react = results.iloc[[idx]]
         width = 0.4
@@ -966,6 +980,12 @@ def plot_fit(idx,results,fluxes_sd=None,save=False,save_dir=''):
     elif isinstance(idx,str):
         colors = cm.summer(np.arange(len(react))/len(react))
         for i in range(len(react)):
+            if (fullreg is not None) and (react['regulator'].iloc[i]!=''):
+                if any([react['rxn_id'].iloc[i].lower() in s for s in list(fullreg.index.values)]):
+                    cand = fullreg.loc[react['rxn_id'].iloc[i].lower()]
+                    reg = react['regulator'].iloc[i][0][4:-2]
+                    if any([reg in s for s in list(cand['metab'])]):
+                        colors[i,:] = [1.0, 0.6, 0.0, 1.0]
             if len(pred_flux[i][0]) < max(sizes):
                 formated = np.array([0.0]*max(sizes))
                 allcond = list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns)
@@ -1007,10 +1027,10 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
         xlabel = 'Reaction'
         title = str('Likelihood improvement in condition %s' % (cond))
         xticklabels = list(noreg['rxn_id'].values)
-        ind = np.arange(len(bottom))
+        ind = np.arange(len(bottom))+0.2
         fig, ax = plt.subplots()
         width = 0.4
-        xticks = ind + 0.2
+        xticks = ind
         plt.bar(ind, bottom-min(bottom)+0.2, width, bottom=min(bottom)-0.2, color='r')
         plt.bar(ind, top, width, bottom=bottom, color='y')
     else:
