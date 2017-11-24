@@ -940,7 +940,7 @@ def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
     ax = heatmap(heat_mat,cmap='jet',xticklabels=cond_names)
     ax.set_xlabel('Conditions')
     if rxn_id is not None:
-        ax.set_yticklabels(results['regulator'].values[::-1],rotation = 0, ha="right")
+        ax.set_yticklabels(results['regulator'].values[::1],rotation = 0, ha="right")
         ax.set_title(str('%s: Fit likelihood across conditions' % rxn_id))
         if save:
             fig.savefig(save_dir+rxn_id+'_heat.pdf', bbox_inches='tight')
@@ -981,10 +981,14 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
         colors = cm.summer(np.arange(len(react))/len(react))
         for i in range(len(react)):
             if (fullreg is not None) and (react['regulator'].iloc[i]!=''):
-                if any([react['rxn_id'].iloc[i].lower() in s for s in list(fullreg.index.values)]):
-                    cand = fullreg.loc[react['rxn_id'].iloc[i].lower()]
+                if react['rxn_id'].iloc[i].lower() in list(fullreg.index.values):
+                    cand = fullreg.loc[[react['rxn_id'].iloc[i].lower()],:]
                     reg = react['regulator'].iloc[i][0][4:-2]
-                    if any([reg in s for s in list(cand['metab'])]):
+                    if react['regulator'].iloc[i][0][0:3]=='ACT': 
+                        bools = [s=='+' for s in cand['mode']]; cand = cand.loc[bools,:]
+                    else: 
+                        bools = [s=='-' for s in cand['mode']]; cand = cand.loc[bools,:]
+                    if reg in list(cand['metab']):
                         colors[i,:] = [1.0, 0.6, 0.0, 1.0]
             if len(pred_flux[i][0]) < max(sizes):
                 formated = np.array([0.0]*max(sizes))
