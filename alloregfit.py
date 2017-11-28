@@ -8,8 +8,6 @@ from obonet import read_obo
 from numpy.random import uniform,normal
 from scipy.stats import norm,chi2
 from scipy.optimize import nnls
-from scipy.integrate import quad
-from math import pi,e
 import matplotlib.pyplot as plt
 from seaborn import heatmap
 from matplotlib import cm
@@ -235,7 +233,7 @@ def write_reg_expr(regulators,reg_type,coop=False):
     add, newframe, reglist = ([] for l in range(3))
     for reg in regulators:
         R = str('c_%s' % reg)
-        K = str('K_%s' % reg)
+        K = str('K_reg_%s' % reg)
         if coop is False:
             if reg_type=='activator':
                 add.append(sym.sympify(R+'/('+R+'+'+K+')'))
@@ -503,20 +501,13 @@ def draw_par(update, parameters, current):
             print('Invalid distribution')
     return draw
 
-#%% Calculate likelihood
-# Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
-# Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
-# equations, and candidates.
-def calculate_lik(idx,parameters, current, summary, equations,candidates=None,regulator=None):
+#%% Retrieve omics data
+# generate list with data from the summary and candidates dataframes.
+    
+def retrieve_omics_data(idx,summary,equations,candidates=None,regulator=None):
     occu = equations['occu']
-    enz = summary['enzyme'][idx].values
-    ncond = enz.shape[1]
     vbles = []
     vbles_vals = []
-    for par in list(parameters['parameters'].values):
-        vbles.append(par)
-        rep_par = np.repeat(current[parameters['parameters'].values==par],ncond)
-        vbles_vals.append(rep_par)
     for sub in list(summary['reactant'][idx].index):
         vbles.append('c_'+sub)
         vbles_vals.append(summary['reactant'][idx].loc[sub].values)
@@ -548,8 +539,24 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
                 cond = summary['enzyme'][idx].columns.values
                 vbles.append('c_'+reg)
                 vbles_vals.append(candidates.loc[reg[:-2],cond].values)
-                
+    param = list(set(re.findall('[Kn]_[A-Za-z0-9_]+',str(occu))))
+    vbles.extend(param)
     f = sym.lambdify(vbles, occu)
+    return param,vbles_vals,f
+
+#%% Calculate likelihood
+# Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
+# Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
+# equations, and candidates.
+    
+def calculate_lik(idx,parameters, current, summary, vbles_vals, param, f):
+    enz = summary['enzyme'][idx].values
+    ncond = enz.shape[1]
+    vbles_vals = list(vbles_vals)
+    for par in param:
+        rep_par = np.repeat(current[parameters['parameters'].values==par],ncond)
+        vbles_vals.append(rep_par)
+    
     flux = summary['flux'][idx]
     bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
     bool_enz = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))
@@ -614,8 +621,9 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
         candidates_cp = None    
     if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
         summary_cp,candidates_cp = add_sampled(idx, current_pars, parameters['parameters'].values, summary_cp, candidates_cp)
+    param,vbles_vals,f = retrieve_omics_data(idx,summary_cp,equations,candidates_cp,regulator)
     current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
-                                np.array(current_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
+                                np.array(current_pars)[parameters['ispar']==True], summary_cp, vbles_vals, param, f)
     if current_lik is None:
         print('ERROR: FVA fluxes are completely unconstrained.')
         return None,None # Quit the evaliation of this expression
@@ -625,8 +633,9 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
                 proposed_pars = draw_par([p], parameters, current_pars)
                 if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
                     summary_cp,candidates_cp = add_sampled(idx, proposed_pars, parameters['parameters'].values, summary_cp, candidates_cp)
+                    param,vbles_vals,f = retrieve_omics_data(idx,summary_cp,equations,candidates_cp,regulator)
                 proposed_lik,pro_kcat,pro_pred_flux,pro_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
-                                    np.array(proposed_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
+                                    np.array(proposed_pars)[parameters['ispar']==True], summary_cp, vbles_vals, param, f)
                 if ((uniform(0,1) < np.exp(proposed_lik)/(np.exp(proposed_lik)+np.exp(current_lik))) or \
                     (proposed_lik > current_lik) or ((proposed_lik==current_lik)and(proposed_lik==-np.inf))):
                     current_pars = proposed_pars
