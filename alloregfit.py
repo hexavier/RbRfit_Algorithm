@@ -148,7 +148,11 @@ def define_reactions(rxn_id, model, fluxes, prot, metab, prot_sd=None, metab_sd=
         product_sd.append(prod_sd.copy())
         enzyme.append(enz_df.copy())
         enzyme_sd.append(enz_sd.copy())
-        flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values].copy(),columns = fluxes.columns, index = [rxn_id[i]]))
+        if isinstance(fluxes,pd.DataFrame):
+            flux.append(pd.DataFrame([fluxes.loc[rxn_id[i]].values].copy(),columns = fluxes.columns, index = [rxn_id[i]]))
+        elif isinstance(fluxes,dict):
+            flux_df = pd.DataFrame([fluxes['min'].loc[rxn_id[i]].values,fluxes['max'].loc[rxn_id[i]].values],columns = fluxes['min'].columns, index = ['min','max'])
+            flux.append(flux_df)
         if binding_site is None:
             bs.append([list(react_df.index.values)+list(prod_df.index.values)])
     
@@ -424,7 +428,7 @@ def build_priors(param, idx, summary, model, priorKeq=False, candidates=None, sa
                         par2.append(15.0+np.log2(np.nanmedian(candidates['inh_other'][idx].loc[param['species'][i]].values)))
                         cand.append(param['species'][i]); candtype.append('inh_other')
                 else:
-                    cond = summary['flux'][idx].columns.values
+                    cond = summary['enzyme'][idx].columns.values
                     par1.append(-15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
                     par2.append(15.0+np.log2(np.nanmedian(candidates.loc[param['species'][i][:-2],cond].values)))
                     cand.append(param['species'][i])
@@ -499,17 +503,6 @@ def draw_par(update, parameters, current):
             print('Invalid distribution')
     return draw
 
-
-#%% Calculate likelihood between flux range
-# Given the flux prediction and min/max fluxes from FVA, integrate normal PDF calculation over this range.
-# Inputs: min/max flux and prediction.
-def range_PDF(pred_flux, flux, ncond, npars):
-    def PDF(x,y):
-        return (1/(np.sqrt(np.sum((x-y)**2)/(ncond-npars))*np.sqrt(2*pi)))*e**(-(x-y)**2/(2*(np.sum((x-y)**2)/(ncond-npars))))
-    likelihood = np.array(list(map(lambda i: quad(PDF,flux[0][i],flux[1][i],args=pred_flux[0][i]),\
-                                   [n for n in range(pred_flux.size)])))
-    return likelihood[:,0]
-    
 #%% Calculate likelihood
 # Calculate the likelihood given the flux point estimate or the lower and upper bounds of flux variability analysis.
 # Inputs: parameter dataframe, current values, summary as generated in define_reactions, 
@@ -552,36 +545,33 @@ def calculate_lik(idx,parameters, current, summary, equations,candidates=None,re
                     vbles.append('c_'+reg)
                     vbles_vals.append(candidates['inh_other'][idx].loc[reg].values)
             elif not (any('c_'+reg in s for s in vbles)):
-                cond = summary['flux'][idx].columns.values
+                cond = summary['enzyme'][idx].columns.values
                 vbles.append('c_'+reg)
                 vbles_vals.append(candidates.loc[reg[:-2],cond].values)
                 
     f = sym.lambdify(vbles, occu)
-    flux = summary['flux'][idx].values
+    flux = summary['flux'][idx]
     bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
     bool_enz = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),list(enz))),1),0))
-    bool_all = ((np.isnan(flux)==0).reshape(ncond,)&(bool_occu)&(bool_enz))
+    bool_all = ((np.isnan(flux.iloc[0,:])==0).values.reshape(ncond,)&(bool_occu)&(bool_enz))
     vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
     ncond = np.sum(bool_all)
     pred_occu = f(*vbles_vals)
-    if len(summary['flux'][idx]) == 1: # fluxes as point estimates
-        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), flux[:,bool_all].reshape(ncond))
+    if flux.shape[0] == 1: # fluxes as point estimates
+        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), flux.loc[:,bool_all].values.reshape(ncond))
         pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
-        npars = len(current)+len(kcat)
-        if ncond>npars:
-            var = np.sum((flux[:,bool_all]-pred_flux)**2)/(ncond-npars)
-            likelihood = norm.pdf(flux[:,bool_all], pred_flux, np.sqrt(var))
-            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
-        else:
-            return None,None,None,None,None # Quit the evaluation of this expression
-    elif len(summary['flux'][idx]) == 2: # min/max range of fluxes
-        ave_flux = np.mean(flux,0)
-        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), ave_flux[:,bool_all])
+        var = residual**2/(ncond)
+        likelihood = norm.cdf(flux.loc[:,bool_all].values, pred_flux, np.sqrt(var))
+        return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
+
+    elif flux.shape[0] == 2: # min/max range of fluxes
+        ave_flux = np.mean(flux.values,0)
+        kcat, residual = nnls(np.transpose(pred_occu*enz[:,bool_all]), ave_flux[bool_all])
         pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
-        npars = len(current)+len(kcat)
-        if ncond>npars:
-            likelihood = (1/(flux[0,bool_all]-flux[1,bool_all]))*range_PDF(pred_flux, flux[:,bool_all], ncond, npars)
-            return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
+        if np.sum(ave_flux)!=0.0:
+            var = residual**2/(ncond)
+            likelihood = (norm.cdf(flux.loc['max',bool_all].values, pred_flux, np.sqrt(var)) - norm.cdf(flux.loc['min',bool_all].values, pred_flux, np.sqrt(var)))/(flux.loc['max',bool_all].values - flux.loc['min',bool_all].values)
+            return np.nansum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
         else:
             return None,None,None,None,None # Quit the evaluation of this expression
 
@@ -615,19 +605,23 @@ def fit_reaction_MCMC(idx, markov_par, parameters, summary, equations,candidates
     colnames = list(parameters['parameters'].values)
     colnames.extend(re.findall('K_cat_[a-zA-Z0-9_]+', str(equations['vmax']))+['likelihood','pred_flux','lik_cond'])
     track = pd.DataFrame(columns=colnames)
-    current_pars = [None] * len(parameters)
-    current_pars = draw_par([p for p in range(len(parameters))], parameters, current_pars)
-    summary_cp=summary.copy(); candidates_cp=candidates.copy()
+    current_pars = [None] * parameters.shape[0]
+    current_pars = draw_par([p for p in range(parameters.shape[0])], parameters, current_pars)
+    summary_cp=summary.copy()
+    if candidates is not None:
+        candidates_cp=candidates.copy()
+    else: 
+        candidates_cp = None    
     if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
         summary_cp,candidates_cp = add_sampled(idx, current_pars, parameters['parameters'].values, summary_cp, candidates_cp)
     current_lik,cur_kcat,cur_pred_flux,cur_lik_cond,bool_all = calculate_lik(idx, parameters.loc[parameters['ispar']], \
                                 np.array(current_pars)[parameters['ispar']==True], summary_cp, equations,candidates_cp,regulator)
     if current_lik is None:
-        print('Number of parameters outpaces the number of conditions.')
+        print('ERROR: FVA fluxes are completely unconstrained.')
         return None,None # Quit the evaliation of this expression
     else:
         for i in range(markov_par['burn_in']+markov_par['nrecord']*markov_par['freq']):
-            for p in range(len(parameters)):
+            for p in range(parameters.shape[0]):
                 proposed_pars = draw_par([p], parameters, current_pars)
                 if (sampleNaN and parameters.loc[parameters['ispar']==False].empty==0):
                     summary_cp,candidates_cp = add_sampled(idx, proposed_pars, parameters['parameters'].values, summary_cp, candidates_cp)
@@ -705,9 +699,9 @@ def cal_uncertainty(idx, expr, parameters, summary, candidates=None, regulator=N
                 vbles_vals.append(candidates.loc[reg[:-2],cond].values)
                 sd_vals.append(candidates_sd.loc[reg[:-2],cond].values)
     
-    flux = summary['flux'][idx].values
+    flux = summary['flux'][idx]
     bool_occu = (np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))==max(np.sum(np.dot(list(map(lambda x: (np.isnan(x)==0),vbles_vals)),1),0))
-    bool_all = ((np.isnan(flux)==0).reshape(ncond,)&(bool_occu))
+    bool_all = ((np.isnan(flux.iloc[0,:])==0).values.reshape(ncond,)&(bool_occu))
     vbles_vals = list(map(lambda x: x[bool_all],vbles_vals))
     ncond = np.sum(bool_all)
     grads = np.zeros((ncond,len(species)))
@@ -742,7 +736,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,candidates_sd=None,pr
             else:
                 max_lik = max(track['likelihood'].values)
                 max_par = track[track['likelihood'].values==max_lik]
-                par_bool = ['K_' in s for s in max_par.columns]
+                par_bool = [',' not in s for s in max_par.columns]; par_bool[-3:]=[False]*3
                 uncertainty = cal_uncertainty(idx, expr[i], max_par.loc[:,par_bool],summary,candidates,regulator[i],candidates_sd)
                 add = {'idx':idx,'reaction':summary['reaction'][idx],'rxn_id':summary['rxn_id'][idx],\
                        'regulator':regulator[i],'equation':(expr[i]['vmax']*expr[i]['occu']),'meas_flux':summary['flux'][idx].loc[:,bool_all],\
@@ -845,11 +839,11 @@ def validate_bycond(results,summary=None,candidates=None):
                 pval_weight.append(np.sum(p*weights))
                 lik_weight.append(np.sum(rxn_results['lik_cond'].iloc[j][0]*weights)*len(cond))
                 ncond.append(len(cond))
-                par_bool = ['K_' in s for s in rxn_results['best_fit'].iloc[j].columns]
+                par_bool = [',' not in s for s in rxn_results['best_fit'].iloc[j].columns]; par_bool[-3:]=[False]*3
                 npar.append(rxn_results['best_fit'].iloc[j].loc[:,par_bool].shape[1])
                 if (summary is not None) and (candidates is not None):
                     summary_cp=summary.copy(); candidates_cp=candidates.copy()
-                    parameters = rxn_results['best_fit'].iloc[j].loc[:,par_bool].columns
+                    parameters = rxn_results['best_fit'].iloc[j].columns
                     if any([',' in s for s in parameters]):
                         summary_cp,candidates_cp = add_sampled(idx,list(rxn_results['best_fit'].iloc[j].iloc[0,:]), parameters, summary_cp, candidates_cp)
                     vbles,vbles_vals = ([] for l in range(2))
@@ -1016,16 +1010,16 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
 def plot_likelihood(results, cond=None, save=False, save_dir=''):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
     if isinstance(cond,str):
-        bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(len(noreg))))))
+        bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(noreg.shape[0])))))
         noreg = noreg.loc[bool_cond].reset_index(drop=True)
-        bottom = np.array(list(map(lambda x: noreg['lik_cond'].iloc[x][0][cond==noreg['meas_flux'].iloc[x].columns][0],list(np.arange(len(noreg))))))
+        bottom = np.array(list(map(lambda x: noreg['lik_cond'].iloc[x][0][cond==noreg['meas_flux'].iloc[x].columns][0],list(np.arange(noreg.shape[0])))))
         top = np.array([0.0]*len(bottom))
         for i,rxn in enumerate(list(noreg['rxn_id'].values)):
             rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
             bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
             rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
             if (rxn_results.empty==False):
-                lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(len(rxn_results)))))
+                lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results.shape[0]))))
                 if bottom[i]<max(lik_values):
                     top[i] = max(lik_values)-bottom[i]
         xlabel = 'Reaction'
@@ -1039,7 +1033,7 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
         plt.bar(ind, top, width, bottom=bottom, color='y')
     else:
         min_value = np.min(np.concatenate(results['lik_cond'].values,1))
-        ncond = np.array(list(map(lambda x: noreg['meas_flux'].iloc[x].shape[1],list(np.arange(len(noreg))))))
+        ncond = np.array(list(map(lambda x: noreg['meas_flux'].iloc[x].shape[1],list(np.arange(noreg.shape[0])))))
         conds = list(noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         ind = np.arange(noreg.shape[0])
         top = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
@@ -1049,15 +1043,15 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
         width = 0.8/len(conds)
         xticks = ind + 0.8 / 2
         for j,cond in enumerate(conds):
-            bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(len(noreg))))))
+            bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(noreg.shape[0])))))
             noreg2 = noreg.loc[bool_cond].reset_index(drop=True)
-            bottom.loc[bool_cond,cond] = np.array(list(map(lambda x: noreg2['lik_cond'].iloc[x][0][cond==noreg2['meas_flux'].iloc[x].columns][0],list(np.arange(len(noreg2))))))
+            bottom.loc[bool_cond,cond] = np.array(list(map(lambda x: noreg2['lik_cond'].iloc[x][0][cond==noreg2['meas_flux'].iloc[x].columns][0],list(np.arange(noreg2.shape[0])))))
             for i,rxn in enumerate(list(noreg2['rxn_id'].values)):
                 rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
                 bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
                 rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
                 if (rxn_results.empty==False):
-                    lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(len(rxn_results)))))
+                    lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][0][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results.shape[0]))))
                     if bottom.loc[rxn,cond]<max(lik_values):
                         top.loc[rxn,cond] = max(lik_values)-bottom.loc[rxn,cond]
             plt.bar(ind+width*(j), bottom[cond].values-min_value+0.2, width, bottom=min_value-0.2, color='r')
