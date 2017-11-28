@@ -7,7 +7,7 @@ from numpy.random import seed
 import numpy as np
 import alloregfit as arf
 
-data_dir = "Y:/users/Xavier/2_new_simmer_test/"
+data_dir = "//imsbnas.ethz.ch/Sauer1/users/Xavier/2_new_simmer_test/"
 model = cobra.io.sbml.create_cobra_model_from_sbml_file(data_dir+"ecoli_core_model.xml")
 fluxes = pd.read_excel(data_dir+"fluxes.xlsx",index_col="name")
 metabolites = pd.read_excel(data_dir+"metabolites.xlsx",index_col="name")
@@ -22,19 +22,19 @@ markov_par = {'freq':10,'nrecord':20,'burn_in':0}
 
 global random
 random = seed(1)
-results = arf.fit_reactions(summary,model,markov_par,candidates,maxreg=1,coop=True)
+results = arf.fit_reactions(summary,model,markov_par,candidates,sampleNaN=False,maxreg=1,coop=True)
 
 class TestAlloRegFit(unittest.TestCase):
 
     def test_size(self):
         self.assertEqual(summary.shape, (8, 10))
         self.assertEqual(candidates.shape, (8, 8))
-        self.assertEqual(results.shape, (21, 11))
+        self.assertEqual(results.shape, (38, 11))
         
     def test_results(self):
         mean = np.mean(results['best_lik'])
-        self.assertEqual(mean, -19.07003090771564)
-        self.assertTrue(results['idx'].iloc[0]==3)
+        self.assertEqual(mean, -4.309018788969981)
+        self.assertTrue(results['idx'].iloc[0]==4)
         self.assertTrue(results['idx'].iloc[-1]==7)
 
 if __name__ == '__main__':
