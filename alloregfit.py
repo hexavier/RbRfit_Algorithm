@@ -610,6 +610,8 @@ def calculate_lik(idx,parameters, current, summary, vbles_vals, param, f):
         pred_flux = np.sum(kcat*np.transpose(enz[:,bool_all]),1)*pred_occu
         var = residual**2/(ncond)
         likelihood = norm.pdf(flux.loc[:,bool_all].values, pred_flux, np.sqrt(var))
+        if isinstance(likelihood,np.ndarray):
+            likelihood = likelihood[0]
         return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
 
     elif flux.shape[0] == 2: # min/max range of fluxes
@@ -800,7 +802,7 @@ def fit_reactions(summary,model,markov_par,candidates=None,candidates_sd=None,pr
 #%% Validate results
 # Run likelihood ratio test and Bayesian a posteriori probability given a gold standard of regulators.
 # Inputs: results dataframe.
-def validate(results, gold_std=None, fullreg=None):
+def validate(results, gold_std=None, fullreg=None, otherreg=None):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
     noreg['pvalue']= np.ones((noreg.shape[0],1))
     validation = noreg[['rxn_id','regulator','best_lik','pvalue']]
@@ -821,30 +823,47 @@ def validate(results, gold_std=None, fullreg=None):
     
     if gold_std is not None:
         reactions = gold_std.index.values
-        regs = fullreg.loc[reactions]
-        regs_unique = regs.drop_duplicates()
+        regs_coli = fullreg.loc[reactions]
+        regs_unique = regs_coli.drop_duplicates()
+        if otherreg is not None:
+            regs_other = otherreg.loc[reactions]
+            n_other = np.zeros([regs_unique.shape[0],1])
         n_tested = np.zeros([regs_unique.shape[0],1])
         n_ecoli = np.zeros([regs_unique.shape[0],1])
         outcome = np.zeros([regs_unique.shape[0],])
         for i,rxn in enumerate(list(regs_unique.index.values)):
             n_tested[i,0] = np.log2(regs_unique.loc[rxn].shape[0])
-            n_ecoli[i,0] = np.sum(regs['metab'].loc[rxn]==regs_unique['metab'].iloc[i])
+            n_ecoli[i,0] = np.sum(regs_coli['metab'].loc[rxn]==regs_unique['metab'].iloc[i])
+            if otherreg is not None:
+                n_other[i,0] = np.sum(regs_other['metab'].loc[rxn]==regs_unique['metab'].iloc[i])
             if any(regs_unique['metab'].iloc[i] in s for s in list(gold_std['metabolite'].loc[rxn])):
                 outcome[i] = 1
-        income = np.concatenate([n_tested,n_ecoli],1)
+        if otherreg is not None:
+            income = np.concatenate([n_tested,n_ecoli,n_other],1)
+        else:
+            income = np.concatenate([n_tested,n_ecoli],1)
         logreg = LogisticRegression()
         logreg.fit(income,outcome)
         
         reactions = [s.lower() for s in list(noreg['rxn_id'].values)]
-        regs = fullreg.loc[reactions]
-        regs_unique = regs.reset_index().drop_duplicates().set_index('rxn_id')
+        regs_coli = fullreg.loc[reactions]
+        regs_unique = regs_coli.reset_index().drop_duplicates().set_index('rxn_id')
         validation2 = validation.loc[validation['regulator']!='']
+        if otherreg is not None:
+            regs_other = otherreg.loc[reactions]
+            n_other = np.zeros([validation2.shape[0],1])
         n_tested = np.zeros([validation2.shape[0],1])
         n_ecoli = np.zeros([validation2.shape[0],1])
         for i,rxn in enumerate(list(validation2['rxn_id'].values)):
             n_tested[i,0] = np.log2(regs_unique.loc[rxn.lower()].shape[0])
-            n_ecoli[i,0] = np.sum(regs['metab'].loc[rxn.lower()]==validation2['regulator'].iloc[i][0][4:-2])
-        test = np.concatenate([n_tested,n_ecoli],1)
+            n_ecoli[i,0] = np.sum([np.sum(regs_coli['metab'].loc[rxn.lower()]==r[4:-2]) for r in validation2['regulator'].iloc[i]])
+            #n_ecoli[i,0] = np.sum(regs_coli['metab'].loc[rxn.lower()]==validation2['regulator'].iloc[i][0][4:-2])
+            if otherreg is not None:
+                n_other[i,0] = np.sum(regs_other['metab'].loc[rxn.lower()]==validation2['regulator'].iloc[i][0][4:-2])
+        if otherreg is not None:
+            test = np.concatenate([n_tested,n_ecoli,n_other],1)
+        else:
+            test = np.concatenate([n_tested,n_ecoli],1)
         prior_reg = logreg.predict_proba(test)
         prior_all = np.concatenate([np.ones([noreg.shape[0],]),prior_reg[:,0]])
         validation['posteriori'] = np.log2(prior_all*(2**validation['best_lik'].values))
@@ -885,9 +904,9 @@ def validate_bycond(results,summary=None,candidates=None):
                 ratio = 2**(rxn_results['lik_cond'].iloc[j]-noreg['lik_cond'].iloc[i][bool_cond])
                 p = chi2.sf(ratio, len(reg))
                 pval.append(p)
-                weights = (np.log(p)/np.sum(np.log(p)))
-                pval_weight.append(np.sum(p*weights))
-                lik_weight.append(np.sum(rxn_results['lik_cond'].iloc[j]*weights)*len(cond))
+                weights = (np.log(p)/np.nansum(np.log(p)))
+                pval_weight.append(np.nansum(p*weights))
+                lik_weight.append(np.nansum(rxn_results['lik_cond'].iloc[j]*weights)*len(cond))
                 ncond.append(len(cond))
                 par_bool = [',' not in s for s in rxn_results['best_fit'].iloc[j].columns]
                 npar.append(rxn_results['best_fit'].iloc[j].loc[:,par_bool].shape[1])
@@ -944,7 +963,7 @@ def validate_bycond(results,summary=None,candidates=None):
                         g_res = g(*vbles_vals)
                         el.append(g_res*candidates_cp.loc[rg[4:-2],cond].values/f_res)
                     elas.append(el)
-                    elas_weight.append(np.sum(el*weights))
+                    elas_weight.append(np.nansum(el*weights))
                 else:
                     elas.append(np.zeros((1,ncond[-1])))
                     elas_weight.append(0)
@@ -959,10 +978,10 @@ def validate_bycond(results,summary=None,candidates=None):
     for i,rxn in enumerate(list(validation['rxn_id'].values)):
         aic.append(2*npar[i]-2*validation['lik_cond'].iloc[i])
         if validation['pvalue'].iloc[i][0] != 1.0:
-            weights = (np.log(validation['pvalue'].iloc[i])/np.sum(np.log(validation['pvalue'].iloc[i])))
+            weights = (np.log(validation['pvalue'].iloc[i])/np.nansum(np.log(validation['pvalue'].iloc[i])))
         else:
             weights = np.ones((1,len(validation['pvalue'].iloc[i])))/len(validation['pvalue'].iloc[i])
-        aic_weight.append(np.sum(aic[-1][0]*weights))
+        aic_weight.append(np.nansum(aic[-1][0]*weights))
     validation['AIC'] = aic
     validation['AIC_weighted'] = aic_weight
     validation['ncond'] = ncond
@@ -974,17 +993,18 @@ def validate_bycond(results,summary=None,candidates=None):
 def heatmap_across_conditions(results,rxn_id=None,save=False,save_dir=''):
     if rxn_id is not None:
         results = results.loc[results['rxn_id']==rxn_id]
-    cond = np.array(list(map(lambda x: x.size,list(results['meas_flux'].values))))
+    cond = np.array(list(map(lambda x: x.shape[1],list(results['meas_flux'].values))))
     cond_names = results.loc[cond==max(cond),'meas_flux'].iloc[0].columns.values
     heat_mat = pd.DataFrame(columns=cond_names)
-    for i in list(results.index.values):
-        add = pd.DataFrame(results['lik_cond'][i],columns=results['meas_flux'][i].columns.values,index=[i])
+    for j,i in enumerate(list(results.index.values)):
+        add = pd.DataFrame(results.loc[i,'lik_cond'].reshape([1,cond[j]]),columns=results.loc[i,'meas_flux'].columns,index=[i])
         heat_mat = heat_mat.append(add)
     fig, ax = plt.subplots()
     ax = heatmap(heat_mat,cmap='jet',xticklabels=cond_names)
     ax.set_xlabel('Conditions')
     if rxn_id is not None:
-        ax.set_yticklabels(results['regulator'].values[::1],rotation = 0, ha="right")
+        ax.set_yticks(np.arange(results.shape[0])+0.5)
+        ax.set_yticklabels(results['regulator'].values,rotation = 0, ha="right")
         ax.set_title(str('%s: Fit likelihood across conditions' % rxn_id))
         if save:
             fig.savefig(save_dir+rxn_id+'_heat.pdf', bbox_inches='tight')
@@ -1012,7 +1032,11 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
     sizes = list(map(lambda x:react['meas_flux'].iloc[x].shape[1],list(np.arange(len(react['meas_flux'])))))
     ind = np.arange(max(sizes))
     fig, ax = plt.subplots()
-    if fluxes_sd is None:
+    if meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].shape[0]==2:
+        meas_flux_sd = (meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['max',:]-meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['min',:])/2
+        means = (meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['max',:]+meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['min',:])/2
+        plt.bar(ind, means.values.reshape(ind.shape), width, color='r', yerr=meas_flux_sd)
+    elif fluxes_sd is None:
         plt.bar(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), width, color='r')
     else:
         meas_flux_sd = fluxes_sd.loc[react['rxn_id'].iloc[0],meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns]
@@ -1027,13 +1051,14 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
             if (fullreg is not None) and (react['regulator'].iloc[i]!=''):
                 if react['rxn_id'].iloc[i].lower() in list(fullreg.index.values):
                     cand = fullreg.loc[[react['rxn_id'].iloc[i].lower()],:]
-                    reg = react['regulator'].iloc[i][0][4:-2]
-                    if react['regulator'].iloc[i][0][0:3]=='ACT': 
-                        bools = [s=='+' for s in cand['mode']]; cand = cand.loc[bools,:]
-                    else: 
-                        bools = [s=='-' for s in cand['mode']]; cand = cand.loc[bools,:]
-                    if reg in list(cand['metab']):
-                        colors[i,:] = [1.0, 0.6, 0.0, 1.0]
+                    for rg in react['regulator'].iloc[i]:
+                        reg = rg[4:-2]
+                        if rg[0:3]=='ACT': 
+                            bools = [s=='+' for s in cand['mode']]; cand = cand.loc[bools,:]
+                        else: 
+                            bools = [s=='-' for s in cand['mode']]; cand = cand.loc[bools,:]
+                        if reg in list(cand['metab']):
+                            colors[i,:] = [1.0, 0.6, 0.0, 1.0]
             if len(pred_flux[i][0]) < max(sizes):
                 formated = np.array([0.0]*max(sizes))
                 allcond = list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns)
@@ -1059,19 +1084,28 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
 # Inputs: results dataframe, reaction id.
 def plot_likelihood(results, cond=None, save=False, save_dir=''):
     noreg = results.loc[results['regulator']==''].reset_index(drop=True)
+    leg_bool = True
     if isinstance(cond,str):
         bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(noreg.shape[0])))))
         noreg = noreg.loc[bool_cond].reset_index(drop=True)
         bottom = np.array(list(map(lambda x: noreg['lik_cond'].iloc[x][cond==noreg['meas_flux'].iloc[x].columns][0],list(np.arange(noreg.shape[0])))))
-        top = np.array([0.0]*len(bottom))
+        top_1reg = np.array([0.0]*len(bottom))
+        top_2reg = np.array([0.0]*len(bottom))
         for i,rxn in enumerate(list(noreg['rxn_id'].values)):
             rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
             bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
-            rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
-            if (rxn_results.empty==False):
-                lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results.shape[0]))))
-                if bottom[i]<max(lik_values):
-                    top[i] = max(lik_values)-bottom[i]
+            bool_1reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])==1,list(np.arange(rxn_results.shape[0])))))
+            bool_2reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])>1,list(np.arange(rxn_results.shape[0])))))
+            rxn_results_1reg = rxn_results[bool_rxn & bool_1reg].reset_index(drop=True)
+            rxn_results_2reg = rxn_results[bool_rxn & bool_2reg].reset_index(drop=True)
+            if (rxn_results_1reg.empty==False):
+                lik_values_1reg = list(map(lambda x: rxn_results_1reg['lik_cond'].iloc[x][cond==rxn_results_1reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_1reg.shape[0]))))
+                if bottom[i]<max(lik_values_1reg):
+                    top_1reg[i] = max(lik_values_1reg)-bottom[i]
+                if (rxn_results_2reg.empty==False):
+                    lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+                    if (max(lik_values_1reg)<max(lik_values_2reg)):
+                        top_2reg[i] = max(lik_values_2reg)-max(lik_values_1reg)
         xlabel = 'Reaction'
         title = str('Likelihood improvement in condition %s' % (cond))
         xticklabels = list(noreg['rxn_id'].values)
@@ -1080,13 +1114,17 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
         width = 0.4
         xticks = ind
         plt.bar(ind, bottom-min(bottom)+0.2, width, bottom=min(bottom)-0.2, color='r')
-        plt.bar(ind, top, width, bottom=bottom, color='y')
+        plt.bar(ind, top_1reg, width, bottom=bottom, color='orange')
+        if top_2reg.size!=0:
+            leg_bool = False
+            plt.bar(ind, top_2reg, width, bottom=top_1reg+bottom, color='gold')
     else:
-        min_value = np.min(np.concatenate(results['lik_cond'].values,1))
+        min_value = np.nanmin(np.concatenate(results['lik_cond']))
         ncond = np.array(list(map(lambda x: noreg['meas_flux'].iloc[x].shape[1],list(np.arange(noreg.shape[0])))))
         conds = list(noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         ind = np.arange(noreg.shape[0])
-        top = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        top_1reg = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        top_2reg = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         bottom = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         fig, ax = plt.subplots()
         title = 'Likelihood improvement'
@@ -1099,13 +1137,23 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
             for i,rxn in enumerate(list(noreg2['rxn_id'].values)):
                 rxn_results = results.loc[(results['rxn_id']==rxn)&(results['regulator']!='')].reset_index(drop=True)
                 bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
-                rxn_results = rxn_results[bool_rxn].reset_index(drop=True)
-                if (rxn_results.empty==False):
-                    lik_values = list(map(lambda x: rxn_results['lik_cond'].iloc[x][cond==rxn_results['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results.shape[0]))))
-                    if bottom.loc[rxn,cond]<max(lik_values):
-                        top.loc[rxn,cond] = max(lik_values)-bottom.loc[rxn,cond]
+                bool_1reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])==1,list(np.arange(rxn_results.shape[0])))))
+                bool_2reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])>1,list(np.arange(rxn_results.shape[0])))))
+                rxn_results_1reg = rxn_results[bool_rxn & bool_1reg].reset_index(drop=True)
+                rxn_results_2reg = rxn_results[bool_rxn & bool_2reg].reset_index(drop=True)
+                if (rxn_results_1reg.empty==False):
+                    lik_values_1reg = list(map(lambda x: rxn_results_1reg['lik_cond'].iloc[x][cond==rxn_results_1reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_1reg.shape[0]))))
+                    if bottom.loc[rxn,cond]<max(lik_values_1reg):
+                        top_1reg.loc[rxn,cond] = max(lik_values_1reg)-bottom.loc[rxn,cond]
+                    if (rxn_results_2reg.empty==False):
+                        lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+                        if (max(lik_values_1reg)<max(lik_values_2reg)):
+                            top_2reg.loc[rxn,cond] = max(lik_values_2reg)-max(lik_values_1reg)
             plt.bar(ind+width*(j), bottom[cond].values-min_value+0.2, width, bottom=min_value-0.2, color='r')
-            plt.bar(ind+width*(j), top[cond].values, width, bottom=bottom[cond].values, color='y')
+            plt.bar(ind+width*(j), top_1reg[cond].values, width, bottom=bottom[cond].values, color='orange')
+            if (top_2reg.empty==False):
+                leg_bool = False
+                plt.bar(ind+width*(j), top_2reg[cond].values, width, bottom=top_1reg[cond].values+bottom[cond].values, color='gold')
         
     xlabel = 'Reaction'
     xticklabels = list(noreg['rxn_id'].values)
@@ -1114,7 +1162,10 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
     ax.set_title(title)
     ax.set_xticks(xticks)
     ax.set_xticklabels(xticklabels,rotation = 45, ha="right")
-    plt.legend(['General M-M','1 Regulator'],loc='upper left')
+    if leg_bool:
+        plt.legend(['General M-M','1 Regulator'],loc='upper left')
+    else:
+        plt.legend(['General M-M','1 Regulator','>1 Regulator'],loc='upper left')
     if save:
         fig.savefig(save_dir+'improvement_'+str(cond)+'.pdf', bbox_inches='tight')
     plt.show()
