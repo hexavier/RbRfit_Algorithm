@@ -1139,8 +1139,8 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
                 bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
                 bool_1reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])==1,list(np.arange(rxn_results.shape[0])))))
                 bool_2reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])>1,list(np.arange(rxn_results.shape[0])))))
-                rxn_results_1reg = rxn_results[bool_rxn & bool_1reg].reset_index(drop=True)
-                rxn_results_2reg = rxn_results[bool_rxn & bool_2reg].reset_index(drop=True)
+                rxn_results_1reg = rxn_results.loc[np.logical_and(bool_rxn,bool_1reg)].reset_index(drop=True)
+                rxn_results_2reg = rxn_results.loc[np.logical_and(bool_rxn,bool_2reg)].reset_index(drop=True)
                 if (rxn_results_1reg.empty==False):
                     lik_values_1reg = list(map(lambda x: rxn_results_1reg['lik_cond'].iloc[x][cond==rxn_results_1reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_1reg.shape[0]))))
                     if bottom.loc[rxn,cond]<max(lik_values_1reg):
@@ -1151,7 +1151,7 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
                             top_2reg.loc[rxn,cond] = max(lik_values_2reg)-max(lik_values_1reg)
             plt.bar(ind+width*(j), bottom[cond].values-min_value+0.2, width, bottom=min_value-0.2, color='r')
             plt.bar(ind+width*(j), top_1reg[cond].values, width, bottom=bottom[cond].values, color='orange')
-            if (top_2reg.empty==False):
+            if any(np.isnan(list(top_2reg.loc[:,cond]))==0):
                 leg_bool = False
                 plt.bar(ind+width*(j), top_2reg[cond].values, width, bottom=top_1reg[cond].values+bottom[cond].values, color='gold')
         
