@@ -929,41 +929,61 @@ def validate_bycond(results,summary=None,candidates=None):
                     for enz in list(summary_cp.loc[idx,'enzyme'].index):
                         vbles.append('c_'+enz)
                         vbles_vals.append(summary_cp.loc[idx,'enzyme'].loc[enz,cond].values)
+                    reg_data = {}
                     for rg in reg:
                         rg = rg[4:]
                         if list(candidates_cp.columns.values)==['act_coli','act_coli_sd', 'act_other', 'act_other_sd',\
                                    'inh_coli','inh_coli_sd', 'inh_other','inh_other_sd']:
                             if (isinstance(candidates_cp.loc[idx,'act_coli'],pd.DataFrame)) and \
-                            (any(rg in s for s in [candidates_cp.loc[idx,'act_coli'].index.values])) and not (any('c_'+rg in s for s in vbles)):
-                                vbles.append('c_'+rg)
-                                vbles_vals.append(candidates_cp.loc[idx,'act_coli'].loc[rg,cond].values)
+                            (any(rg in s for s in [candidates_cp.loc[idx,'act_coli'].index.values])):
+                                if not (any('c_'+rg in s for s in vbles)):
+                                    vbles.append('c_'+rg)
+                                    vbles_vals.append(candidates_cp.loc[idx,'act_coli'].loc[rg,cond].values)
+                                    reg_data[rg] = candidates_cp.loc[idx,'act_coli'].loc[rg,cond].values
+                                else:
+                                    reg_data[rg] = candidates_cp.loc[idx,'act_coli'].loc[rg,cond].values
                             elif (isinstance(candidates_cp.loc[idx,'inh_coli'],pd.DataFrame)) and \
-                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_coli'].index.values])) and not (any('c_'+rg in s for s in vbles)):
-                                vbles.append('c_'+rg)
-                                vbles_vals.append(candidates_cp.loc[idx,'inh_coli'].loc[rg,cond].values)
+                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_coli'].index.values])):
+                                if not (any('c_'+rg in s for s in vbles)):
+                                    vbles.append('c_'+rg)
+                                    vbles_vals.append(candidates_cp.loc[idx,'inh_coli'].loc[rg,cond].values)
+                                    reg_data[rg]=candidates_cp.loc[idx,'inh_coli'].loc[rg,cond].values
+                                else:
+                                    reg_data[rg]=candidates_cp.loc[idx,'inh_coli'].loc[rg,cond].values
                             elif (isinstance(candidates_cp.loc[idx,'act_other'],pd.DataFrame)) and \
-                            (any(rg in s for s in [candidates_cp.loc[idx,'act_other'].index.values])) and not (any('c_'+rg in s for s in vbles)):
-                                vbles.append('c_'+rg)
-                                vbles_vals.append(candidates_cp.loc[idx,'act_other'].loc[rg,cond].values)
+                            (any(rg in s for s in [candidates_cp.loc[idx,'act_other'].index.values])):
+                                if not (any('c_'+rg in s for s in vbles)):
+                                    vbles.append('c_'+rg)
+                                    vbles_vals.append(candidates_cp.loc[idx,'act_other'].loc[rg,cond].values)
+                                    reg_data[rg]=candidates_cp.loc[idx,'act_other'].loc[rg,cond].values
+                                else:
+                                    reg_data[rg]=candidates_cp.loc[idx,'act_other'].loc[rg,cond].values
                             elif (isinstance(candidates_cp.loc[idx,'inh_other'],pd.DataFrame)) and \
-                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_other'].index.values])) and not (any('c_'+rg in s for s in vbles)):
-                                vbles.append('c_'+rg)
-                                vbles_vals.append(candidates_cp.loc[idx,'inh_other'].loc[rg,cond].values)
+                            (any(rg in s for s in [candidates_cp.loc[idx,'inh_other'].index.values])):
+                                if not (any('c_'+rg in s for s in vbles)):
+                                    vbles.append('c_'+rg)
+                                    vbles_vals.append(candidates_cp.loc[idx,'inh_other'].loc[rg,cond].values)
+                                    reg_data[rg]=candidates_cp.loc[idx,'inh_other'].loc[rg,cond].values
+                                else:
+                                    reg_data[rg]=candidates_cp.loc[idx,'inh_other'].loc[rg,cond].values
                         elif not (any('c_'+rg in s for s in vbles)):
                             vbles.append('c_'+rg)
                             vbles_vals.append(candidates_cp.loc[rg[:-2],cond].values)
+                            reg_data[rg]=candidates_cp.loc[rg[:-2],cond].values
+                        else:
+                            reg_data[rg]=candidates_cp.loc[rg[:-2],cond].values
 
                     expr = rxn_results['equation'].iloc[j]
                     f = sym.lambdify(vbles, expr)
                     f_res = f(*vbles_vals)
                     el = []
-                    for rg in reg:
+                    for n,rg in enumerate(reg):
                         gradient = sym.diff(expr,'c_'+rg[4:])
                         g = sym.lambdify(vbles, gradient)
                         g_res = g(*vbles_vals)
-                        el.append(g_res*candidates_cp.loc[rg[4:-2],cond].values/f_res)
+                        el.append(g_res*reg_data[rg[4:]]/f_res)
                     elas.append(el)
-                    elas_weight.append(np.nansum(el*weights))
+                    elas_weight.append(np.nansum(el*weights,1))
                 else:
                     elas.append(np.zeros((1,ncond[-1])))
                     elas_weight.append(0)
@@ -1026,6 +1046,8 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
         react = results.loc[results['rxn_id']==idx][::-1]
         if len(react)>25:
             react = react.iloc[0:25,:]
+            if '' not in react['regulator']:
+                react = react.append(results.loc[(results['rxn_id']==idx)&(results['regulator']=='')])
         width = 0.8/(len(react)+1)
     meas_flux = react['meas_flux']
     pred_flux = react['pred_flux'].values
@@ -1059,6 +1081,8 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
                             bools = [s=='-' for s in cand['mode']]; cand = cand.loc[bools,:]
                         if reg in list(cand['metab']):
                             colors[i,:] = [1.0, 0.6, 0.0, 1.0]
+            elif (react['regulator'].iloc[i]==''):
+                colors[i,:] = [0.0, 0.6, 1.0, 1.0]
             if len(pred_flux[i][0]) < max(sizes):
                 formated = np.array([0.0]*max(sizes))
                 allcond = list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns)
@@ -1073,7 +1097,7 @@ def plot_fit(idx,results,fluxes_sd=None,fullreg=None,save=False,save_dir=''):
         plt.legend(['Measured']+list(react['regulator'].values))
         ax.set_title('%s: Flux fit between predicted and measured data' % (react['rxn_id'].iloc[0]))
     ax.set_ylabel('Flux (mmol*gCDW-1*h-1)')
-    ax.set_xticks(ind + 0.8 / 2)
+    ax.set_xticks(ind + 0.8 / 2 - width/2)
     ax.set_xticklabels(list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns),rotation = 30, ha="right")
     if save:
         fig.savefig(save_dir+'barflux_'+str(idx)+'.pdf', bbox_inches='tight')
