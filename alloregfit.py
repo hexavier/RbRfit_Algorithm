@@ -537,7 +537,7 @@ def draw_par(update, parameters, current):
         if parameters['distribution'][par]=='unif':
             draw[par] = 2**uniform(parameters['par1'][par],parameters['par2'][par])
         elif parameters['distribution'][par]=='norm':
-            draw[par] = normal(parameters['par1'][par],parameters['par2'][par])
+            draw[par] = np.abs(normal(parameters['par1'][par],parameters['par2'][par]))
         else:
             print('Invalid distribution')
     return draw
@@ -1120,16 +1120,20 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
             bool_rxn = np.array(list(map(lambda x: any(cond in s for s in list(rxn_results['meas_flux'].iloc[x].columns)),list(np.arange(rxn_results.shape[0])))))
             bool_1reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])==1,list(np.arange(rxn_results.shape[0])))))
             bool_2reg = np.array(list(map(lambda x: len(rxn_results['regulator'].iloc[x])>1,list(np.arange(rxn_results.shape[0])))))
-            rxn_results_1reg = rxn_results[bool_rxn & bool_1reg].reset_index(drop=True)
-            rxn_results_2reg = rxn_results[bool_rxn & bool_2reg].reset_index(drop=True)
+            rxn_results_1reg = rxn_results[np.logical_and(bool_rxn,bool_1reg)].reset_index(drop=True)
+            rxn_results_2reg = rxn_results[np.logical_and(bool_rxn,bool_2reg)].reset_index(drop=True)
             if (rxn_results_1reg.empty==False):
                 lik_values_1reg = list(map(lambda x: rxn_results_1reg['lik_cond'].iloc[x][cond==rxn_results_1reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_1reg.shape[0]))))
                 if bottom[i]<max(lik_values_1reg):
                     top_1reg[i] = max(lik_values_1reg)-bottom[i]
-                if (rxn_results_2reg.empty==False):
-                    lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+            if (rxn_results_2reg.empty==False):
+                lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+                if (rxn_results_1reg.empty==False):
                     if (max(lik_values_1reg)<max(lik_values_2reg)):
                         top_2reg[i] = max(lik_values_2reg)-max(lik_values_1reg)
+                else:
+                    if bottom[i]<max(lik_values_2reg):
+                        top_2reg[i] = max(lik_values_2reg)-bottom[i]
         xlabel = 'Reaction'
         title = str('Likelihood improvement in condition %s' % (cond))
         xticklabels = list(noreg['rxn_id'].values)
@@ -1143,17 +1147,17 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
             leg_bool = False
             plt.bar(ind, top_2reg, width, bottom=top_1reg+bottom, color='gold')
     else:
-        min_value = np.nanmin(np.concatenate(results['lik_cond']))
+        min_value = np.nanmin(np.concatenate(results['lik_cond'].values))
         ncond = np.array(list(map(lambda x: noreg['meas_flux'].iloc[x].shape[1],list(np.arange(noreg.shape[0])))))
         conds = list(noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         ind = np.arange(noreg.shape[0])
-        top_1reg = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
-        top_2reg = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        top_1reg = pd.DataFrame(data=np.zeros((noreg.shape[0],max(ncond))),index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
+        top_2reg = pd.DataFrame(data=np.zeros((noreg.shape[0],max(ncond))),index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         bottom = pd.DataFrame(index=noreg['rxn_id'],columns=noreg['meas_flux'].iloc[ncond==max(ncond)][0].columns)
         fig, ax = plt.subplots()
         title = 'Likelihood improvement'
         width = 0.8/len(conds)
-        xticks = ind + 0.8 / 2
+        xticks = ind + 0.8 / 2 - width/2
         for j,cond in enumerate(conds):
             bool_cond = np.array(list(map(lambda x: any(cond in s for s in list(noreg['meas_flux'].iloc[x].columns)),list(np.arange(noreg.shape[0])))))
             noreg2 = noreg.loc[bool_cond].reset_index(drop=True)
@@ -1169,10 +1173,14 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
                     lik_values_1reg = list(map(lambda x: rxn_results_1reg['lik_cond'].iloc[x][cond==rxn_results_1reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_1reg.shape[0]))))
                     if bottom.loc[rxn,cond]<max(lik_values_1reg):
                         top_1reg.loc[rxn,cond] = max(lik_values_1reg)-bottom.loc[rxn,cond]
-                    if (rxn_results_2reg.empty==False):
-                        lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+                if (rxn_results_2reg.empty==False):
+                    lik_values_2reg = list(map(lambda x: rxn_results_2reg['lik_cond'].iloc[x][cond==rxn_results_2reg['meas_flux'].iloc[x].columns][0],list(np.arange(rxn_results_2reg.shape[0]))))
+                    if (rxn_results_1reg.empty==False):
                         if (max(lik_values_1reg)<max(lik_values_2reg)):
                             top_2reg.loc[rxn,cond] = max(lik_values_2reg)-max(lik_values_1reg)
+                    else:
+                        if bottom.loc[rxn,cond]<max(lik_values_2reg):
+                            top_2reg.loc[rxn,cond] = max(lik_values_2reg)-bottom.loc[rxn,cond]
             plt.bar(ind+width*(j), bottom[cond].values-min_value+0.2, width, bottom=min_value-0.2, color='r')
             plt.bar(ind+width*(j), top_1reg[cond].values, width, bottom=bottom[cond].values, color='orange')
             if any(np.isnan(list(top_2reg.loc[:,cond]))==0):
