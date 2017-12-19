@@ -33,7 +33,7 @@ class TestAlloRegFit(unittest.TestCase):
         
     def test_results(self):
         mean = np.mean(results['best_lik'])
-        self.assertEqual(mean, -4.309018788969981)
+        self.assertEqual(mean, -16.595871951401392)
         self.assertTrue(results['idx'].iloc[0]==4)
         self.assertTrue(results['idx'].iloc[-1]==7)
 
