@@ -6,7 +6,7 @@ import sympy as sym
 import numpy as np
 from obonet import read_obo
 from numpy.random import uniform,normal
-from scipy.stats import norm,chi2
+from scipy.stats import norm,chi2, pearsonr
 from scipy.optimize import nnls
 import matplotlib.pyplot as plt
 from seaborn import heatmap
@@ -612,7 +612,7 @@ def calculate_lik(idx,parameters, current, summary, vbles_vals, param, f):
         likelihood = norm.pdf(flux.loc[:,bool_all].values, pred_flux, np.sqrt(var))
         if isinstance(likelihood,np.ndarray):
             likelihood = likelihood[0]
-        return np.sum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
+        return np.nansum(np.log(likelihood)),kcat,pred_flux,np.log(likelihood),bool_all
 
     elif flux.shape[0] == 2: # min/max range of fluxes
         ave_flux = np.mean(flux.values,0)
@@ -814,7 +814,7 @@ def validate(results, gold_std=None, fullreg=None, otherreg=None):
         if rxn_results.empty==0:
             rxn_results['pvalue']= np.ones((rxn_results.shape[0],1))
             for j,reg in enumerate(list(rxn_results['regulator'].values)):
-                ratio = 2**(rxn_results['best_lik'].iloc[j]-noreg['best_lik'].iloc[i])
+                ratio = 2*(rxn_results['best_lik'].iloc[j]-noreg['best_lik'].iloc[i])
                 p = chi2.sf(ratio, len(reg))
                 rxn_results.loc[j,'pvalue']=p
                 ncond.append(len(rxn_results['lik_cond'].iloc[j]))
@@ -901,7 +901,7 @@ def validate_bycond(results,summary=None,candidates=None):
             for j,reg in enumerate(list(rxn_results['regulator'].values)):
                 bool_cond = np.array(list(map(lambda x: any(x in s for s in list(rxn_results.loc[j,'meas_flux'].columns)),list(noreg.loc[i,'meas_flux'].columns))))
                 cond = list(rxn_results.loc[j,'meas_flux'].columns)
-                ratio = 2**(rxn_results['lik_cond'].iloc[j]-noreg['lik_cond'].iloc[i][bool_cond])
+                ratio = 2*(rxn_results['lik_cond'].iloc[j]-noreg['lik_cond'].iloc[i][bool_cond])
                 p = chi2.sf(ratio, len(reg))
                 pval.append(p)
                 weights = (np.log(p)/np.nansum(np.log(p)))
@@ -1001,7 +1001,7 @@ def validate_bycond(results,summary=None,candidates=None):
             weights = (np.log(validation['pvalue'].iloc[i])/np.nansum(np.log(validation['pvalue'].iloc[i])))
         else:
             weights = np.ones((1,len(validation['pvalue'].iloc[i])))/len(validation['pvalue'].iloc[i])
-        aic_weight.append(np.nansum(aic[-1][0]*weights))
+        aic_weight.append(np.nansum(aic[-1]*weights))
     validation['AIC'] = aic
     validation['AIC_weighted'] = aic_weight
     validation['ncond'] = ncond
@@ -1200,4 +1200,90 @@ def plot_likelihood(results, cond=None, save=False, save_dir=''):
         plt.legend(['General M-M','1 Regulator','>1 Regulator'],loc='upper left')
     if save:
         fig.savefig(save_dir+'improvement_'+str(cond)+'.pdf', bbox_inches='tight')
+    plt.show()
+
+#%% Plot correlation prediction vs measured flux
+# Plot correlation between predicted and measured fluxes across conditions.
+# Inputs: results dataframe.
+def plot_corr(results,xlabel='rxn_id',save=False,save_dir=''):
+    yplot = [(pearsonr(results.loc[i,'meas_flux'].values,results.loc[i,'pred_flux'][0])[0])**2 if results.loc[i,'meas_flux'].shape[0]==1 else (pearsonr(np.nanmean(results.loc[i,'meas_flux'].values,0),results.loc[i,'pred_flux'][0])[0])**2 for i in results.index]
+    xlabels = list(results.loc[np.isnan(yplot)!=True,xlabel])
+    yplot = np.array(yplot)[np.isnan(yplot)!=True]
+    to_return = pd.DataFrame(yplot, index=xlabels)
+    xlabels = sorted(xlabels,key=lambda i: float(yplot[[i in s for s in xlabels]]))
+    yplot = np.array(sorted(yplot))
+    xplot = np.arange(len(yplot))
+    plt.scatter(xplot[yplot>=.35],yplot[yplot>=.35],c='g')
+    plt.scatter(xplot[yplot<.35],yplot[yplot<.35],c='r')
+    plt.legend(['R2 >= 0.35', 'R2 < 0.35'])
+    plt.title('Fit of Michaelis-Menten prediction')
+    plt.ylabel('Pearson Determination Coefficient')
+    plt.xlabel(xlabel)
+    plt.xticks(xplot,xlabels,rotation = 50, ha="right")
+    if save:
+        plt.savefig(save_dir+'correlation.pdf', bbox_inches='tight')
+    plt.show()
+    return to_return
+
+#%% Plot predicted and measured fluxes
+# Plot predicted and measured fluxes across conditions.
+# Inputs: index or reaction id, results dataframe, summary dataframe, standard deviation of fluxes.
+def plot_scatter(idx,results,edge=None,fluxes_sd=None,save=False,save_dir=''):
+    react = results.loc[[idx]]
+    meas_flux = react['meas_flux']
+    pred_flux = react['pred_flux'].values
+    noreg_flux = results.loc[np.logical_and(results['rxn_id']==str(react['rxn_id'].values[0]),results['regulator']==''),'pred_flux'].values
+    sizes = list(map(lambda x:react['meas_flux'].iloc[x].shape[1],list(np.arange(len(react['meas_flux'])))))
+    ind = np.arange(max(sizes))
+    fig, ax = plt.subplots()
+    if meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].shape[0]==2:
+        meas_flux_sd = (meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['max',:]-meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['min',:])/2
+        means = (meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['max',:]+meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].loc['min',:])/2
+        ax.scatter(ind, means.values.reshape(ind.shape),color='r')
+        ax.errorbar(ind, means.values.reshape(ind.shape),yerr=meas_flux_sd,fmt='none')
+        if edge is None:
+            meas, = ax.plot(ind, means.values.reshape(ind.shape), color='r',lw=2.0)
+        else:
+            start=0
+            for i in edge:
+                meas, = ax.plot(ind[start:start+i], means.values.reshape(ind.shape)[start:start+i], color='r',lw=2.0)
+                start += i
+    elif fluxes_sd is None:
+        ax.scatter(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape),color='r')
+        if edge is None:
+            meas, = ax.plot(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), color='r',lw=2.0)
+        else:
+            start=0
+            for i in edge:
+                meas, = ax.plot(ind[start:start+i], meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape)[start:start+i], color='r',lw=2.0)
+                start += i
+    else:
+        meas_flux_sd = fluxes_sd.loc[react['rxn_id'].iloc[0],meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns]
+        ax.scatter(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), color='r')
+        ax.errorbar(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape),yerr=meas_flux_sd,fmt='none')
+        if edge is None:
+            meas, = ax.plot(ind, meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape), color='r',lw=2.0)
+        else:
+            start=0
+            for i in edge:
+                meas, = ax.plot(ind[start:start+i], meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].values.reshape(ind.shape)[start:start+i], color='r',lw=2.0)
+                start += i
+    ax.scatter(ind, pred_flux[0][0].reshape(ind.shape), color='b')
+    ax.scatter(ind, noreg_flux[0][0].reshape(ind.shape), color='b')
+    if edge is None:
+        pred, = ax.plot(ind, pred_flux[0][0].reshape(ind.shape), color='b',lw=2.0)
+        noreg, = ax.plot(ind, noreg_flux[0][0].reshape(ind.shape), color='b',lw=2.0,ls=':')
+    else:
+        start=0
+        for i in edge:
+            pred, = ax.plot(ind[start:start+i], pred_flux[0][0].reshape(ind.shape)[start:start+i], color='b',lw=2.0)
+            noreg, = ax.plot(ind[start:start+i], noreg_flux[0][0].reshape(ind.shape)[start:start+i], color='b',lw=2.0,ls=':')
+            start += i
+    ax.legend([meas,pred,noreg],['Measured', 'Regulated Model','Base Model'])
+    ax.set_title('%s%s: Flux fit between predicted and measured data' % (results['rxn_id'][idx],results['regulator'][idx]))
+    ax.set_ylabel('Flux (mmol*gCDW-1*h-1)')
+    ax.set_xticks(ind)
+    ax.set_xticklabels(list(meas_flux.loc[np.array(sizes)==max(sizes)].iloc[0].columns),rotation = 30, ha="right")
+    if save:
+        fig.savefig(save_dir+'scatter_'+str(idx)+'.pdf', bbox_inches='tight')
     plt.show()
